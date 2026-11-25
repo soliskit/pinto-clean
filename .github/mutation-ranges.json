@@ -888,7 +888,29 @@
     {
       "shard": "room-877-929-b",
       "target": "room",
-      "mutate": "public/room.js:931-1064",
+      "mutate": "public/room.js:931-982",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-g",
+      "target": "room",
+      "mutate": "public/room.js:983-1039",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-h",
+      "target": "room",
+      "mutate": "public/room.js:1040-1064",
       "mutators": [
         "ConditionalExpression"
       ],
