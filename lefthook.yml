@@ -17,3 +17,9 @@ pre-commit:
     python-format:
       glob: '**/*.py'
       run: ruff format --check -- {staged_files}
+
+# Exact commit metadata checks, alongside existing checks.
+commit-msg:
+  commands:
+    credit-message:
+      run: python3 "$(git rev-parse --git-path credit-guard/entry.py)" commit-msg {1}
