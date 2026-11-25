@@ -1,0 +1,3378 @@
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { setTimeout as sleep } from 'node:timers/promises'
+import { after, afterEach, before, describe, test } from 'node:test'
+import type { Browser, BrowserContext, JSHandle, Page } from 'playwright'
+import { io } from 'socket.io-client'
+import {
+  eventually,
+  launchBrowser,
+  record,
+  startServer,
+  type Server
+} from './helpers.ts'
+
+function withoutCamera() {
+  navigator.mediaDevices.getUserMedia = () =>
+    Promise.reject(new DOMException('Permission denied', 'NotAllowedError'))
+}
+
+/** Holds every capture request until the test releases it */
+function gatedCapture() {
+  window.realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(
+    navigator.mediaDevices
+  )
+  window.captureGate = []
+  navigator.mediaDevices.getUserMedia = (constraints) =>
+    new Promise((resolve, reject) => {
+      window.captureGate.push({ constraints, resolve, reject })
+    })
+}
+
+/** Holds the page's processing of join answers until the test releases them,
+ * oldest first, the way captureGate queues capture requests */
+function heldJoinAnswer() {
+  let realIo: typeof import('socket.io-client').io
+  Object.defineProperty(window, 'io', {
+    configurable: true,
+    get() {
+      return (...args: Parameters<typeof import('socket.io-client').io>) => {
+        const socket = realIo(...args)
+        window.roomSocket = socket
+        const realEmit = socket.emit.bind(socket)
+        socket.emit = (event: string, ...rest: unknown[]) => {
+          const callback = rest.at(-1)
+          if (event === 'join-room' && typeof callback === 'function') {
+            rest.pop()
+            // Tag the attempt: the id stays harness metadata, never
+            // transmitted, and its ack outcome is recorded when the
+            // acknowledgement resolves in either direction
+            const attempt: {
+              id: number
+              outcome?: { answer: unknown[] } | { error: string }
+            } = { id: window.joinAttempts.length + 1 }
+            window.joinAttempts.push(attempt)
+            // The answer itself arrived in time: socket.io clears its ack
+            // timeout on arrival. Only the page's processing is held.
+            const ack = callback as (...args: unknown[]) => unknown
+            return realEmit(event, ...rest, (...answer: unknown[]) => {
+              const [error] = answer as [Error | null, ...unknown[]]
+              // Errors (ack timeout, disconnect flush) fire at once, the
+              // way socket.io would deliver them; only answers that
+              // actually arrived are held, with their raw payload
+              if (error !== null) {
+                attempt.outcome = { error: String(error) }
+                return ack(...answer)
+              }
+              attempt.outcome = { answer }
+              window.heldJoinAnswers.push({
+                answer,
+                release: () => ack(...answer)
+              })
+            })
+          }
+          return realEmit(event, ...rest)
+        }
+        return socket
+      }
+    },
+    set(value: typeof import('socket.io-client').io) {
+      realIo = value
+    }
+  })
+  window.heldJoinAnswers = []
+  window.joinAttempts = []
+  window.releaseJoinAnswer = () => {
+    const held = window.heldJoinAnswers.shift()
+    // A release with nothing held is a test bug, not a no-op
+    if (!held) throw new Error('no held join answer to release')
+    held.release()
+  }
+}
+
+/** Records, by caller peer id, every call the room page receives, every
+ * one it closes or answers, the connections it answers on, and every
+ * stream the page's outgoing calls receive with its sender's peer id */
+function recordRoomCalls() {
+  window.incomingCalls = []
+  window.closedCalls = []
+  window.answeredCalls = []
+  window.answeredConns = []
+  window.outgoingStreams = []
+  window.outgoingConns = []
+  window.outgoingLocalStreams = []
+  let RealPeer: typeof Peer
+  Object.defineProperty(window, 'Peer', {
+    configurable: true,
+    get() {
+      return RealPeer
+    },
+    set(value: typeof Peer) {
+      RealPeer = value
+      type On = (
+        this: InstanceType<typeof Peer>,
+        event: string,
+        fn: (...args: unknown[]) => unknown
+      ) => unknown
+      const realOn = Reflect.get(value.prototype, 'on') as On
+      ;(value.prototype as { on: On }).on = function (
+        this: InstanceType<typeof Peer>,
+        event: string,
+        fn: (...args: unknown[]) => unknown
+      ) {
+        if (event !== 'call') return realOn.call(this, event, fn)
+        return realOn.call(this, event, ((
+          call: import('peerjs').MediaConnection
+        ) => {
+          window.incomingCalls.push(call.peer)
+          const realClose = call.close.bind(call)
+          call.close = () => {
+            window.closedCalls.push(call.peer)
+            realClose()
+          }
+          const realAnswer = call.answer.bind(call) as (
+            ...args: unknown[]
+          ) => unknown
+          call.answer = (...args: unknown[]) => {
+            window.answeredCalls.push(call.peer)
+            window.answeredConns.push(call)
+            return realAnswer(...args)
+          }
+          fn(call)
+        }) as (...args: unknown[]) => unknown)
+      }
+      const realCall = Reflect.get(value.prototype, 'call') as (
+        this: InstanceType<typeof Peer>,
+        ...args: unknown[]
+      ) => import('peerjs').MediaConnection
+      ;(value.prototype as { call: unknown }).call = function (
+        this: InstanceType<typeof Peer>,
+        ...args: unknown[]
+      ) {
+        const conn = realCall.apply(this, args)
+        window.outgoingConns.push(conn)
+        window.outgoingLocalStreams.push(args[1] as MediaStream)
+        conn.on('stream', (stream: MediaStream) =>
+          window.outgoingStreams.push({ peer: conn.peer, stream })
+        )
+        return conn
+      }
+    }
+  })
+}
+
+/**
+ * Records the events a page's calls and room socket receive, each with the
+ * page state read after its dispatch settles. The log is append-only:
+ * assertions read the record, never a transient live DOM. Entries bind only
+ * temporal association (this event's dispatch left this page state); they do
+ * not by themselves prove which internal library path produced an event.
+ */
+function recordCallTimeline() {
+  type Entry = {
+    i: number
+    event: string
+    conn?: string
+    state?: string
+    type?: string
+    peer?: string
+    reason?: unknown
+    errorAfter?: string | null
+    statusAfter?: string | null
+  }
+  type Conn = {
+    connectionId: string
+    peer: string
+    open: boolean
+    emit: (event: string, ...args: unknown[]) => unknown
+    on: (event: 'close', fn: () => void) => unknown
+  }
+  const w = window as unknown as {
+    callTimeline: Entry[]
+    outgoingConns: Conn[]
+    outgoingLocalStreams: MediaStream[]
+    recordCallTimelineClose: (conn: Conn) => void
+  }
+  w.callTimeline = []
+  w.outgoingConns = []
+  w.outgoingLocalStreams = []
+  const snapshot = (entry: Entry) => {
+    const error = document.querySelector('#error')
+    const status = document.querySelector('#status')
+    entry.errorAfter =
+      error && !(error as HTMLElement).hidden ? error.textContent : null
+    entry.statusAfter = status?.textContent ?? null
+    const settled = {
+      i: entry.i,
+      errorAfter: entry.errorAfter,
+      statusAfter: entry.statusAfter
+    }
+    console.log(`Call-timeline-settled ${JSON.stringify(settled)}`)
+  }
+  // 'close' dispatches through the PROTOTYPE emitter (super.emit), which
+  // bypasses the instance emit shadow. Record the real dispatch instead:
+  // this listener is registered before the page's own handlers, and the
+  // pinned emitter invokes listeners in registration order, so the entry
+  // is pushed before the page reacts and settled after the whole dispatch
+  const recordClose = (conn: Conn) => {
+    conn.on('close', () => {
+      const entry: Entry = {
+        i: w.callTimeline.length,
+        event: 'close',
+        conn: conn.connectionId
+      }
+      w.callTimeline.push(entry)
+      console.log(`Call-timeline-event ${JSON.stringify(entry)}`)
+      queueMicrotask(() => {
+        snapshot(entry)
+      })
+    })
+  }
+  w.recordCallTimelineClose = recordClose
+  // The socket library loads after init scripts, so capture its assignment
+  // the way heldJoinAnswer does; incoming events reach onAny listeners
+  // before the page's own handlers (pinned client emitEvent)
+  let realIo: typeof import('socket.io-client').io
+  Object.defineProperty(window, 'io', {
+    configurable: true,
+    get() {
+      return (...args: Parameters<typeof import('socket.io-client').io>) => {
+        const socket = realIo(...args)
+        socket.onAny((event: string, ...eventArgs: unknown[]) => {
+          const entry: Entry = {
+            i: w.callTimeline.length,
+            event,
+            peer: eventArgs[0] as string,
+            reason: eventArgs[1]
+          }
+          w.callTimeline.push(entry)
+          console.log(`Call-timeline-event ${JSON.stringify(entry)}`)
+          // After the page's synchronous handlers for this event settle
+          queueMicrotask(() => {
+            snapshot(entry)
+          })
+        })
+        return socket
+      }
+    },
+    set(value: typeof import('socket.io-client').io) {
+      realIo = value
+    }
+  })
+  let RealPeer: typeof Peer
+  Object.defineProperty(window, 'Peer', {
+    configurable: true,
+    get() {
+      return RealPeer
+    },
+    set(value: typeof Peer) {
+      RealPeer = value
+      const realCall = Reflect.get(value.prototype, 'call') as (
+        this: InstanceType<typeof Peer>,
+        ...args: unknown[]
+      ) => (typeof w.outgoingConns)[number]
+      ;(value.prototype as { call: unknown }).call = function (
+        this: InstanceType<typeof Peer>,
+        ...args: unknown[]
+      ) {
+        const conn = realCall.apply(this, args)
+        w.outgoingConns.push(conn)
+        w.outgoingLocalStreams.push(args[1] as MediaStream)
+        const realEmit = conn.emit.bind(conn)
+        // The entry is pushed BEFORE dispatch so nested emissions keep
+        // chronological order; the page state is attached after dispatch.
+        conn.emit = (event: string, ...eventArgs: unknown[]) => {
+          const entry: Entry = {
+            i: w.callTimeline.length,
+            event,
+            conn: conn.connectionId
+          }
+          if (event === 'iceStateChanged') entry.state = eventArgs[0] as string
+          if (event === 'error')
+            entry.type = (eventArgs[0] as { type?: string } | undefined)?.type
+          w.callTimeline.push(entry)
+          console.log(`Call-timeline-event ${JSON.stringify(entry)}`)
+          try {
+            return realEmit(event, ...eventArgs)
+          } finally {
+            snapshot(entry)
+          }
+        }
+        recordClose(conn)
+        return conn
+      }
+    }
+  })
+}
+
+let server: Server | undefined
+let browser: Browser | undefined
+const contexts: BrowserContext[] = []
+
+// Test bodies require successful setup; cleanup may also run after failure.
+function ready<T>(resource: T | undefined, name: string): T {
+  assert.ok(resource, `${name} setup did not complete`)
+  return resource
+}
+
+before(async () => {
+  ;[server, browser] = await Promise.all([startServer(), launchBrowser()])
+})
+after(async () => {
+  await browser?.close()
+  await server?.stop()
+})
+afterEach(async () => {
+  await Promise.all(contexts.splice(0).map((context) => context.close()))
+})
+
+/** A page in its own browser context, like a separate person */
+async function newPage(
+  init?: (() => void) | (() => void)[],
+  on: Server = ready(server, 'server')
+) {
+  const context = await ready(browser, 'browser').newContext({
+    baseURL: on.url
+  })
+  context.setDefaultTimeout(10_000)
+  contexts.push(context)
+  await context.addInitScript(record)
+  for (const fn of Array.isArray(init) ? init : init ? [init] : [])
+    await context.addInitScript(fn)
+  return context.newPage()
+}
+
+interface Room {
+  page: Page
+  name: string
+  peerId: string
+}
+
+/** Opens a room page and waits until Join can be pressed */
+async function openRoom(
+  name: string,
+  init?: (() => void) | (() => void)[],
+  on?: Server
+): Promise<Room> {
+  const page = await newPage(init, on)
+  const idResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/peerjs/id'
+  )
+  await page.goto(`/room/${encodeURIComponent(name)}`)
+  const peerId = await (await idResponse).text()
+  await page.locator('#call:enabled').waitFor()
+  // PeerJS makes one while checking what the browser supports
+  await page.evaluate(() => (window.recorded.peerConnections.length = 0))
+  return { page, name, peerId }
+}
+
+/** Presses Join and waits until the server has put the page in the room */
+async function join({ page, name, peerId }: Room) {
+  const from = ready(server, 'server').output().length
+  await page.click('#call')
+  await ready(server, 'server').waitForOutput(
+    `user: ${peerId} - joined: ${name}`,
+    from
+  )
+}
+
+/** Everything the room page shows, so tests can compare it whole */
+function controls(page: Page) {
+  return page.evaluate(() => {
+    const byId = (id: string) => document.getElementById(id) as HTMLElement
+    const button = (id: string) => {
+      const found = byId(id) as HTMLButtonElement
+      return found.textContent + (found.disabled ? ' (disabled)' : '')
+    }
+    return {
+      title: document.title,
+      heading: byId('title').textContent,
+      status: byId('status').textContent,
+      mute: button('mute'),
+      camera: button('camera'),
+      call: button('call'),
+      callEnds: byId('call').classList.contains('end'),
+      removePhoto: !byId('remove-photo').hidden,
+      photoInput: !(byId('photo') as HTMLInputElement).disabled,
+      hint: byId('self-label').title,
+      error: byId('error').hidden
+        ? null
+        : [...byId('error').children]
+            .map((entry) => {
+              const heading = entry.children[0] as Element | undefined
+              const message = entry.children[1] as Element | undefined
+              return `${heading?.textContent ?? ''}: ${message?.textContent ?? ''}`
+            })
+            .join(' | ')
+    }
+  })
+}
+
+const beforeJoining = (room: string) => ({
+  title: `Pinto | ${room}`,
+  heading: `Join ${room}`,
+  status: 'Press Join to start the call',
+  mute: 'Mute',
+  camera: 'Turn On Camera',
+  call: 'Join',
+  callEnds: false,
+  removePhoto: false,
+  photoInput: true,
+  hint: 'Choose a photo to show instead of your video',
+  error: null
+})
+
+const inCall = (room: string, status: string) => ({
+  ...beforeJoining(room),
+  heading: `You are in ${room}`,
+  status,
+  call: 'Leave',
+  callEnds: true
+})
+
+const status = (page: Page) => () => page.textContent('#status')
+
+/**
+ * What a page's calls have received and sent so far, from the connection
+ * statistics: packets for each kind, and video frames decoded.
+ */
+function mediaFlow(page: Page) {
+  return () =>
+    page.evaluate(async () => {
+      const flow = {
+        audioReceived: 0,
+        videoReceived: 0,
+        framesDecoded: 0,
+        audioSent: 0,
+        videoSent: 0
+      }
+      for (const connection of window.recorded.peerConnections) {
+        const stats = (await connection.getStats()).values() as Iterable<
+          | {
+              type: 'inbound-rtp'
+              kind: string
+              packetsReceived: number
+              framesDecoded: number
+            }
+          | { type: 'outbound-rtp'; kind: string; packetsSent: number }
+        >
+        for (const stat of stats) {
+          if (stat.type === 'inbound-rtp') {
+            if (stat.kind === 'audio')
+              flow.audioReceived += stat.packetsReceived
+            if (stat.kind === 'video') {
+              flow.videoReceived += stat.packetsReceived
+              flow.framesDecoded += stat.framesDecoded
+            }
+          }
+          if (stat.type === 'outbound-rtp') {
+            if (stat.kind === 'audio') flow.audioSent += stat.packetsSent
+            if (stat.kind === 'video') flow.videoSent += stat.packetsSent
+          }
+        }
+      }
+      return flow
+    })
+}
+
+/**
+ * The other people's videos: the kinds of track each one gets, and whether
+ * frames have arrived.
+ */
+function attendees(page: Page) {
+  return () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('#attendees video')].map((node) => {
+        const video = node as HTMLVideoElement
+        const stream = video.srcObject as MediaStream
+        const kinds = stream.getTracks().map((track) => track.kind)
+        const playing = video.videoWidth > 0 ? 'playing' : 'waiting'
+        return `${kinds.sort().join('+')} ${playing}`
+      })
+    )
+}
+
+/** The readyState of every track of every stream the page has captured */
+function allTrackStates(page: Page) {
+  return () =>
+    page.evaluate(() =>
+      window.recorded.mediaStreams
+        .flatMap((stream) => stream.getTracks())
+        .map((track) => track.readyState)
+    )
+}
+
+/** The readyState of every audio track the page has captured */
+function audioStates(page: Page) {
+  return () =>
+    page.evaluate(() =>
+      window.recorded.mediaStreams
+        .flatMap((stream) => stream.getAudioTracks())
+        .map((track) => track.readyState)
+    )
+}
+
+/** Whether the self view, and every open call, show the camera */
+function showsCamera(page: Page) {
+  return page.evaluate(() => {
+    const camera = window.recorded.media?.getVideoTracks()[0]
+    const self = document.getElementById('self') as HTMLVideoElement
+    const selfTrack = (self.srcObject as MediaStream).getVideoTracks()[0]
+    const sent = window.recorded.peerConnections
+      .filter((connection) => connection.signalingState !== 'closed')
+      .map(
+        (connection) =>
+          connection
+            .getSenders()
+            .find((sender) => sender.track?.kind === 'video')?.track?.id ===
+          camera?.id
+      )
+    return { self: selfTrack.id === camera?.id, sent }
+  })
+}
+
+/** Colors of the self view at each [x, y] point of its 400 by 300 frame */
+function selfColors(page: Page, points: [number, number][]) {
+  return () =>
+    page.evaluate((points) => {
+      const video = document.getElementById('self') as HTMLVideoElement
+      const canvas = document.createElement('canvas')
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D
+      context.drawImage(video, 0, 0)
+      return points.map(([x, y]) => {
+        const [r, g, b, a] = context.getImageData(x, y, 1, 1).data
+        if (a < 128) return 'nothing'
+        if (r > 200 && g < 60 && b < 60) return 'red'
+        if (b > 200 && r < 60 && g < 60) return 'blue'
+        if (r < 60 && g < 60 && b < 60) return 'black'
+        return `rgb(${String(r)}, ${String(g)}, ${String(b)})`
+      })
+    }, points)
+}
+
+/** An image file of one color */
+function image(color: string, width: number, height: number) {
+  return {
+    name: `${color}.svg`,
+    mimeType: 'image/svg+xml',
+    buffer: Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${String(width)}" height="${String(height)}"><rect width="100%" height="100%" fill="${color}"/></svg>`
+    )
+  }
+}
+
+/** A plain PeerJS client in its own page, to call room pages directly */
+async function openCaller() {
+  const page = await newPage()
+  await page.goto('/')
+  await page.addScriptTag({ url: '/vendor/peerjs.min.js' })
+  await page.evaluate(async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    })
+    const peer = new Peer({
+      host: location.hostname,
+      port: Number(location.port),
+      path: '/'
+    })
+    window.caller = { peer, stream, answered: new Set(), closed: new Set() }
+  })
+  await page.waitForFunction(() => window.caller.peer.open)
+  return {
+    page,
+    call: (peerId: string) =>
+      page.evaluate((peerId) => {
+        const call = window.caller.peer.call(peerId, window.caller.stream)
+        // Fires once for each track
+        call.on('stream', () => window.caller.answered.add(call.connectionId))
+      }, peerId),
+    /** Joins a room, so it counts as a member when it calls */
+    join: async (roomName: string) => {
+      await page.addScriptTag({ url: '/socket.io/socket.io.min.js' })
+      await page.evaluate(async (roomName) => {
+        const socket = io()
+        window.caller.socket = socket
+        await new Promise<void>((resolve) =>
+          socket.on('connect', () => {
+            resolve()
+          })
+        )
+        await socket.emitWithAck('join-room', roomName, window.caller.peer.id)
+      }, roomName)
+    },
+    /** How many of its calls have been answered with a stream */
+    answered: () => page.evaluate(() => window.caller.answered.size)
+  }
+}
+
+/** Ids of callers whose calls the room page received */
+const incomingCalls = (page: Page): Promise<string[]> =>
+  page.evaluate(() => window.incomingCalls)
+
+/** Ids of callers whose incoming calls the room page closed */
+const closedCalls = (page: Page): Promise<string[]> =>
+  page.evaluate(() => window.closedCalls)
+
+/** Ids of callers whose incoming calls the room page answered */
+const answeredCalls = (page: Page): Promise<string[]> =>
+  page.evaluate(() => window.answeredCalls)
+
+/** Raw payloads of the join answers currently held, oldest first */
+const heldAnswers = (page: Page): Promise<unknown[][]> =>
+  page.evaluate(() => window.heldJoinAnswers.map((held) => held.answer))
+
+void describe('before joining', () => {
+  void test('shows the room name and lets you join', async () => {
+    const { page } = await openRoom('Team #1/ü')
+    assert.deepEqual(await controls(page), beforeJoining('Team #1/ü'))
+    assert.deepEqual(await showsCamera(page), { self: false, sent: [] })
+  })
+
+  void test('Mute turns the microphone off, and Unmute on again', async () => {
+    const room = await openRoom('mute')
+
+    // Before joining, Mute chooses how you join; nothing is captured yet
+    await room.page.click('#mute')
+    assert.deepEqual(await controls(room.page), {
+      ...beforeJoining('mute'),
+      mute: 'Unmute'
+    })
+    assert.deepEqual(await audioStates(room.page)(), [])
+
+    // Joining muted captures no microphone
+    await join(room)
+    assert.deepEqual(await audioStates(room.page)(), [])
+
+    // Unmute captures it, Mute stops it
+    await room.page.click('#mute')
+    await eventually(audioStates(room.page), ['live'], 3_000)
+    await room.page.click('#mute')
+    await eventually(audioStates(room.page), ['ended'], 3_000)
+
+    // Unmute replaces the stopped microphone with a live track
+    await room.page.click('#mute')
+    await eventually(audioStates(room.page), ['ended', 'live'], 3_000)
+  })
+
+  void test('Turn On Camera shows the camera, and Turn Off Camera the photo again', async () => {
+    const room = await openRoom('camera')
+
+    // Before joining, the button chooses whether you join with the camera
+    // on; the camera itself stays off until then
+    await room.page.click('#camera')
+    assert.deepEqual(await controls(room.page), {
+      ...beforeJoining('camera'),
+      camera: 'Turn Off Camera',
+      photoInput: false,
+      hint: ''
+    })
+    assert.deepEqual(await showsCamera(room.page), { self: false, sent: [] })
+
+    // Joining with the camera on captures it and shows it
+    await join(room)
+    await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+
+    await room.page.click('#camera')
+    assert.deepEqual(await showsCamera(room.page), { self: false, sent: [] })
+  })
+
+  void test('without a camera, says why and still lets you join', async () => {
+    const room = await openRoom('no camera', withoutCamera)
+
+    // Nothing is captured before Join, so there is no error yet
+    assert.deepEqual(await controls(room.page), beforeJoining('no camera'))
+
+    // The failure shows when joining tries to capture, and joining works
+    await join(room)
+    await eventually(() => controls(room.page), {
+      ...inCall('no camera', '1st in the room'),
+      mute: 'Unmute',
+      error:
+        "Camera and microphone: Pinto can't reach your camera or microphone: Permission denied"
+    })
+  })
+
+  void test('camera denial when joining keeps the mic and shows camera off', async () => {
+    const room = await openRoom('camera-denied', () => {
+      const getUserMedia = navigator.mediaDevices.getUserMedia.bind(
+        navigator.mediaDevices
+      )
+      navigator.mediaDevices.getUserMedia = (constraints) =>
+        constraints?.video
+          ? Promise.reject(
+              new DOMException('Permission denied', 'NotAllowedError')
+            )
+          : getUserMedia(constraints)
+    })
+    await room.page.click('#camera')
+    await join(room)
+    await eventually(() => controls(room.page), {
+      ...inCall('camera-denied', '1st in the room'),
+      error:
+        "Camera and microphone: Pinto can't reach your camera or microphone: Permission denied"
+    })
+    await eventually(audioStates(room.page), ['live'], 3_000)
+    assert.deepEqual(await showsCamera(room.page), { self: false, sent: [] })
+  })
+
+  void test('a chosen photo shows instead of the placeholder until removed', async () => {
+    const { page } = await openRoom('photo')
+    const placeholder = selfColors(page, [
+      [200, 150],
+      [60, 10],
+      [10, 10]
+    ])
+    await eventually(placeholder, ['black', 'black', 'nothing'])
+
+    // A wide photo shrinks to 288 by 144, in the middle of the frame
+    await page.setInputFiles('#photo', image('red', 1000, 500))
+    const wide = selfColors(page, [
+      [200, 150],
+      [57, 150],
+      [343, 150],
+      [55, 150],
+      [345, 150],
+      [200, 79],
+      [200, 221],
+      [200, 77],
+      [200, 223]
+    ])
+    await eventually(wide, [
+      ...['red', 'red', 'red', 'nothing', 'nothing'],
+      ...['red', 'red', 'nothing', 'nothing']
+    ])
+    assert.equal((await controls(page)).removePhoto, true)
+    // So the same file can be chosen again
+    assert.equal(await page.inputValue('#photo'), '')
+
+    // A small photo keeps its size, 100 by 50
+    await page.setInputFiles('#photo', image('blue', 100, 50))
+    const small = selfColors(page, [
+      [200, 150],
+      [151, 150],
+      [149, 150],
+      [200, 124]
+    ])
+    await eventually(small, ['blue', 'blue', 'nothing', 'nothing'])
+
+    await page.click('#remove-photo')
+    await eventually(placeholder, ['black', 'black', 'nothing'])
+    assert.deepEqual(await controls(page), beforeJoining('photo'))
+  })
+
+  void test('clicking your own preview opens the photo chooser, and the chosen photo shows', async () => {
+    const { page } = await openRoom('preview-click')
+    const placeholder = selfColors(page, [
+      [200, 150],
+      [60, 10],
+      [10, 10]
+    ])
+    await eventually(placeholder, ['black', 'black', 'nothing'])
+
+    // The click, not the file input, is what asks for a file
+    const [chooser] = await Promise.all([
+      page.waitForEvent('filechooser'),
+      page.click('#self-label')
+    ])
+    await chooser.setFiles(image('red', 1000, 500))
+
+    // Same wide photo as above: 288 by 144, in the middle of the frame
+    const wide = selfColors(page, [
+      [200, 150],
+      [57, 150],
+      [343, 150],
+      [55, 150],
+      [345, 150],
+      [200, 79],
+      [200, 221],
+      [200, 77],
+      [200, 223]
+    ])
+    await eventually(wide, [
+      ...['red', 'red', 'red', 'nothing', 'nothing'],
+      ...['red', 'red', 'nothing', 'nothing']
+    ])
+    assert.equal((await controls(page)).removePhoto, true)
+  })
+
+  void test('a file that is not an image leaves the last picture', async () => {
+    const { page } = await openRoom('not an image')
+    const errors: Error[] = []
+    page.on('pageerror', (error) => errors.push(error))
+    const center = selfColors(page, [[200, 150]])
+    await eventually(center, ['black'])
+
+    await page.setInputFiles('#photo', {
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('not an image')
+    })
+    // The photo is drawn again every second
+    await sleep(1500)
+    assert.deepEqual(await center(), ['black'])
+    assert.deepEqual(errors, [])
+  })
+})
+
+void describe('in a call', () => {
+  void test('Join joins the room, and Leave leaves it', async () => {
+    const room = await openRoom('solo')
+    await join(room)
+    // The status settles after admission; poll instead of racing the render
+    await eventually(
+      () => controls(room.page),
+      inCall('solo', '1st in the room')
+    )
+
+    const from = ready(server, 'server').output().length
+    await room.page.click('#call')
+    assert.deepEqual(await controls(room.page), beforeJoining('solo'))
+    await ready(server, 'server').waitForOutput(
+      `user: ${room.peerId} - left: solo`,
+      from
+    )
+  })
+
+  void test('a room name outside the room-name rule is refused with a shown reason', async () => {
+    const room = await openRoom('bad/name')
+    await room.page.click('#call')
+    await room.page
+      .locator('#error', {
+        hasText:
+          'Room names can use letters (A-Z), numbers, spaces and dashes, up to 40 characters.'
+      })
+      .waitFor()
+    // The reason-carrying refusal is not retried: one refusal, not a storm
+    await sleep(2_500)
+    const refusals = ready(server, 'server')
+      .output()
+      .match(/refused: name outside the rule/g)
+    assert.equal(refusals?.length, 1)
+    // Back to not joined, with Join available and the reason shown
+    assert.deepEqual(await controls(room.page), {
+      ...beforeJoining('bad/name'),
+      error:
+        'Cannot join: Room names can use letters (A-Z), numbers, spaces and dashes, up to 40 characters.'
+    })
+  })
+
+  void test('a trailing slash in the room address opens the same room', async () => {
+    // A copied link can carry one final slash; openRoom cannot navigate
+    // to one (it encodes the whole name), so this test navigates directly
+    const page = await newPage()
+    const idResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/peerjs/id'
+    )
+    await page.goto('/room/garden/')
+    const peerId = await (await idResponse).text()
+    await page.locator('#call:enabled').waitFor()
+
+    // The final slash is link formatting, not part of the name
+    assert.deepEqual(await controls(page), beforeJoining('garden'))
+
+    const from = ready(server, 'server').output().length
+    await page.click('#call')
+    await ready(server, 'server').waitForOutput(
+      `user: ${peerId} - joined: garden`,
+      from
+    )
+    // The status settles after admission; poll instead of racing the render
+    await eventually(() => controls(page), inCall('garden', '1st in the room'))
+  })
+
+  void test('an encoded slash at the end of the address is still refused with a shown reason', async () => {
+    // %2F is not link formatting: the name 'garden/' breaks the rule
+    const page = await newPage()
+    await page.goto('/room/garden%2F')
+    await page.locator('#call:enabled').waitFor()
+
+    await page.click('#call')
+    await page
+      .locator('#error', {
+        hasText:
+          'Room names can use letters (A-Z), numbers, spaces and dashes, up to 40 characters.'
+      })
+      .waitFor()
+    assert.deepEqual(await controls(page), {
+      ...beforeJoining('garden/'),
+      error:
+        'Cannot join: Room names can use letters (A-Z), numbers, spaces and dashes, up to 40 characters.'
+    })
+  })
+
+  void test('an encoded slash inside the address is refused, not folded into the name', async () => {
+    // Only a trailing literal slash is link formatting; the decoded name
+    // 'a/b' keeps its interior slash and breaks the room-name rule
+    const page = await newPage()
+    await page.goto('/room/a%2Fb')
+    await page.locator('#call:enabled').waitFor()
+
+    await page.click('#call')
+    await page
+      .locator('#error', {
+        hasText:
+          'Room names can use letters (A-Z), numbers, spaces and dashes, up to 40 characters.'
+      })
+      .waitFor()
+    assert.deepEqual(await controls(page), {
+      ...beforeJoining('a/b'),
+      error:
+        'Cannot join: Room names can use letters (A-Z), numbers, spaces and dashes, up to 40 characters.'
+    })
+  })
+
+  void test('the stream offered to a member carries one video and one audio track', async () => {
+    // Capture stays blocked: a granted microphone would replace the tracks
+    // the room constructed its offered stream with before the offer is read
+    const a = await openRoom('stream-shape', [withoutCamera, recordRoomCalls])
+    await join(a)
+    const b = await openRoom('stream-shape')
+    await join(b)
+
+    // The member already in the room calls the joiner, offering one
+    // photo-or-camera track and one silent-or-microphone track
+    await eventually(
+      () =>
+        a.page.evaluate(() =>
+          window.outgoingLocalStreams.map((stream) =>
+            stream
+              .getTracks()
+              .map((track) => track.kind)
+              .sort()
+              .join('+')
+          )
+        ),
+      ['audio+video']
+    )
+  })
+
+  void test('a plain join with an empty early-call queue answers nothing, closes nothing and logs no console error', async () => {
+    const room = await openRoom('quiet-join', recordRoomCalls)
+    const consoleErrors: string[] = []
+    room.page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text())
+    })
+
+    await join(room)
+    await eventually(status(room.page), '1st in the room')
+
+    // No one called, so nothing was decided, shown or logged
+    assert.deepEqual(await room.page.evaluate(() => window.answeredCalls), [])
+    assert.deepEqual(await room.page.evaluate(() => window.closedCalls), [])
+    assert.equal((await controls(room.page)).error, null)
+    assert.deepEqual(consoleErrors, [])
+  })
+
+  void test('everyone in the room sees and hears everyone else', async () => {
+    const a = await openRoom('trio')
+    const b = await openRoom('trio')
+    const c = await openRoom('trio')
+    const elsewhere = await openRoom('elsewhere')
+    await join(elsewhere)
+    await join(a)
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+    await eventually(status(b.page), '2nd in the room')
+    await join(c)
+
+    const two = ['audio+video playing', 'audio+video playing']
+    for (const { page } of [a, b, c]) {
+      await eventually(attendees(page), two)
+      assert.deepEqual(await controls(page), inCall('trio', '3rd in the room'))
+    }
+    assert.deepEqual(await attendees(elsewhere.page)(), [])
+    assert.equal(await status(elsewhere.page)(), '1st in the room')
+  })
+
+  void test('the fourth person in a room is told they are 4th', async () => {
+    const pages = [
+      await openRoom('quartet'),
+      await openRoom('quartet'),
+      await openRoom('quartet'),
+      await openRoom('quartet')
+    ]
+    for (const [index, room] of pages.entries()) {
+      await join(room)
+      const wanted = ['1st', '2nd', '3rd', '4th'][index]
+      await eventually(status(room.page), `${wanted} in the room`)
+    }
+  })
+
+  void test('audio and video packets keep flowing both ways', async () => {
+    const a = await openRoom('flow')
+    const b = await openRoom('flow')
+    await join(a)
+    await join(b)
+    await eventually(attendees(a.page), ['audio+video playing'])
+    await eventually(attendees(b.page), ['audio+video playing'])
+
+    const pages = [a.page, b.page]
+    const before = await Promise.all(pages.map((page) => mediaFlow(page)()))
+    await sleep(2000)
+    const after = await Promise.all(pages.map((page) => mediaFlow(page)()))
+
+    // Each side takes in, and sends out, more audio and video than it did
+    // two seconds earlier, so media went both ways between the two readings
+    for (const [i, flow] of after.entries()) {
+      for (const key of [
+        'audioReceived',
+        'videoReceived',
+        'framesDecoded',
+        'audioSent',
+        'videoSent'
+      ] as const) {
+        assert.ok(
+          flow[key] > before[i][key],
+          `page ${String(i + 1)}: ${key} did not increase from ${String(before[i][key])}`
+        )
+      }
+    }
+  })
+
+  void test('a failed call connection logs the PeerJS error', async () => {
+    const a = await openRoom('call-error')
+    const b = await openRoom('call-error')
+    await join(a)
+    await join(b)
+    await eventually(attendees(a.page), ['audio+video playing'])
+    await eventually(attendees(b.page), ['audio+video playing'])
+
+    // Watch for the error room.js logs from its call error handler
+    const consoleErrors: { type?: string; message?: string }[] = []
+    a.page.on('console', (message) => {
+      if (message.type() !== 'error') return
+      const first = message.args()[0] as JSHandle | undefined
+      first
+        ?.evaluate((error) => ({
+          type: (error as { type?: string } | null)?.type,
+          message: (error as { message?: string } | null)?.message
+        }))
+        .then((entry) => consoleErrors.push(entry))
+        .catch(() => {})
+    })
+
+    // Simulate the browser reporting the one live call's transport as
+    // failed, so the real PeerJS listener produces the error
+    const driven = await a.page.evaluate(() => {
+      const connections = window.recorded.peerConnections
+      if (connections.length !== 1)
+        return `expected one managed connection, found ${String(connections.length)}`
+      const [pc] = connections
+      if (typeof pc.oniceconnectionstatechange !== 'function')
+        return 'the PeerJS ICE listener is not registered'
+      if (
+        pc.iceConnectionState !== 'connected' &&
+        pc.iceConnectionState !== 'completed'
+      )
+        return `connection not established: ${pc.iceConnectionState}`
+      Object.defineProperty(pc, 'iceConnectionState', {
+        configurable: true,
+        get: () => 'failed'
+      })
+      pc.dispatchEvent(new Event('iceconnectionstatechange'))
+      return 'ok'
+    })
+    assert.equal(driven, 'ok')
+
+    // PeerJS itself constructs the error, naming the peer it lost
+    const wanted = {
+      type: 'negotiation-failed',
+      message: `Negotiation of connection to ${b.peerId} failed.`
+    }
+    await eventually(
+      () =>
+        Promise.resolve(
+          consoleErrors.find(
+            (entry) =>
+              entry.type === wanted.type && entry.message === wanted.message
+          ) ?? null
+        ),
+      wanted
+    )
+
+    // PeerJS then closes the call, and the page drops the peer's video
+    await eventually(attendees(a.page), [])
+  })
+
+  void test('Leave leaves the call for everyone, and Join joins again', async () => {
+    const a = await openRoom('again')
+    const b = await openRoom('again')
+    await join(a)
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+
+    await b.page.click('#call')
+    assert.deepEqual(await controls(b.page), beforeJoining('again'))
+    assert.deepEqual(await attendees(b.page)(), [])
+    await eventually(status(a.page), '1st in the room')
+    assert.deepEqual(await attendees(a.page)(), [])
+
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+    await eventually(status(b.page), '2nd in the room')
+  })
+
+  void test('closing the page leaves the call', async () => {
+    const a = await openRoom('closing', recordRoomCalls)
+    const b = await openRoom('closing')
+    await join(a)
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+
+    await b.page.context().close()
+    // Approved semantics: a closed app is indistinguishable from a
+    // temporary room loss, so the frozen tile lingers with the recovery
+    // notice until the browser declares the call dead
+    await eventually(
+      async () => (await controls(a.page)).error,
+      'Call connection: A call was interrupted. Waiting for its connection to recover.'
+    )
+    await eventually(status(a.page), '2nd in the room')
+    // The browser declaring the call dead drives the locked library's
+    // failed path, which emits negotiation-failed and closes; the app
+    // ends the call visibly
+    await a.page.evaluate(() => {
+      const pc = window.outgoingConns[0].peerConnection
+      Object.defineProperty(pc, 'iceConnectionState', { get: () => 'failed' })
+      pc.dispatchEvent(new Event('iceconnectionstatechange'))
+    })
+    await eventually(
+      async () => (await controls(a.page)).error,
+      'Call connection: A call connection failed. The call ended.'
+    )
+    await eventually(status(a.page), '1st in the room')
+    assert.deepEqual(await attendees(a.page)(), [])
+  })
+
+  void test('Turn On Camera and Turn Off Camera change what the call sends', async () => {
+    const a = await openRoom('switch')
+    const b = await openRoom('switch')
+    await join(a)
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+    assert.deepEqual(await showsCamera(a.page), { self: false, sent: [false] })
+
+    // Calls switch tracks without renegotiating, which takes a moment
+    await a.page.click('#camera')
+    await eventually(() => showsCamera(a.page), { self: true, sent: [true] })
+
+    await a.page.click('#camera')
+    await eventually(() => showsCamera(a.page), { self: false, sent: [false] })
+  })
+
+  void test('calls are turned down until you join', async () => {
+    const room = await openRoom('quiet')
+    const caller = await openCaller()
+    const offered = () =>
+      room.page.evaluate(() =>
+        window.recorded.peerMessages.some(
+          (message) =>
+            (JSON.parse(message) as { type?: string }).type === 'OFFER'
+        )
+      )
+
+    // room.js handles the offer as it arrives, so it has turned it down by
+    // the time the test sees it
+    await caller.call(room.peerId)
+    await eventually(offered, true)
+    const connections = () =>
+      room.page.evaluate(() => window.recorded.peerConnections.length)
+    assert.equal(await connections(), 0)
+    assert.deepEqual(await attendees(room.page)(), [])
+
+    // Once the caller joins too, its call is answered
+    await join(room)
+    await caller.join('quiet')
+    await caller.call(room.peerId)
+    await eventually(caller.answered, 1)
+    await eventually(status(room.page), '2nd in the room')
+  })
+
+  void test('a new call from the same person replaces the old one', async () => {
+    const room = await openRoom('twice')
+    const caller = await openCaller()
+    await caller.join('twice')
+    await join(room)
+    const connections = () =>
+      room.page.evaluate(() =>
+        window.recorded.peerConnections.map(
+          (connection) => connection.signalingState === 'closed'
+        )
+      )
+
+    await caller.call(room.peerId)
+    await eventually(caller.answered, 1)
+    await caller.call(room.peerId)
+    await eventually(caller.answered, 2)
+
+    // The first call is closed and only the second one is shown
+    assert.deepEqual(await connections(), [true, false])
+    await eventually(attendees(room.page), ['audio+video playing'])
+    assert.equal(await status(room.page)(), '2nd in the room')
+  })
+
+  void test('a refused Join goes back to Join after trying again', async () => {
+    const room = await openRoom('taken')
+    // Someone already in the room holds the page's id
+    const squatter = io(ready(server, 'server').url, {
+      transports: ['websocket'],
+      forceNew: true,
+      reconnection: false
+    })
+    await new Promise<void>((resolve, reject) => {
+      squatter.once('connect', () => {
+        resolve()
+      })
+      squatter.once('connect_error', reject)
+    })
+    squatter.emit('join-room', 'taken', room.peerId)
+    await ready(server, 'server').waitForOutput(
+      `user: ${room.peerId} - joined: taken`
+    )
+
+    // The page keeps trying for a while, then shows Join again
+    await room.page.click('#call')
+    await eventually(() => controls(room.page), beforeJoining('taken'), 20_000)
+    // The microphone the failed join captured is stopped again
+    await eventually(
+      async () => (await audioStates(room.page)()).every((s) => s === 'ended'),
+      true,
+      3_000
+    )
+    // The page itself never got in: only the squatter's join is logged
+    assert.equal(
+      ready(server, 'server')
+        .output()
+        .match(new RegExp(`user: ${room.peerId} - joined: taken`, 'g'))?.length,
+      1
+    )
+    squatter.disconnect()
+  })
+
+  void test('Leave cancels a Join that is still being retried', async (t) => {
+    // The cancellation window is pinned to the real retry cadence, so
+    // this test runs its own server without the suite's shortened
+    // timings; teardown is registered the moment each resource exists
+    const realTiming = await startServer({ PINTO_TEST_TIMINGS: '' })
+    t.after(async () => {
+      await realTiming.stop()
+    })
+    // The socket connects on construction, so its listeners are
+    // registered immediately - attaching them later could miss the event
+    // and hang - and the connection is awaited before anything else, so
+    // an early connect_error is never an unhandled rejection
+    const squatter = io(realTiming.url, {
+      transports: ['websocket'],
+      forceNew: true,
+      reconnection: false
+    })
+    t.after(() => {
+      void squatter.disconnect()
+    })
+    await new Promise<void>((resolve, reject) => {
+      squatter.once('connect', () => {
+        resolve()
+      })
+      squatter.once('connect_error', reject)
+    })
+    const room = await openRoom('taken-leave', undefined, realTiming)
+    squatter.emit('join-room', 'taken-leave', room.peerId)
+    await realTiming.waitForOutput(`user: ${room.peerId} - joined: taken-leave`)
+
+    // Join is refused and retried every 2 seconds; Leave cancels that
+    const from = realTiming.output().length
+    await room.page.click('#call')
+    await realTiming.waitForOutput(
+      'join-room refused: id already in room',
+      from
+    )
+    await room.page.click('#call') // Leave
+    await sleep(4_500) // beyond the next retry
+    assert.equal(
+      realTiming
+        .output()
+        .slice(from)
+        .match(/join-room refused: id already in room/g)?.length,
+      1
+    )
+    assert.equal(
+      realTiming
+        .output()
+        .match(new RegExp(`user: ${room.peerId} - joined: taken-leave`, 'g'))
+        ?.length,
+      1
+    )
+  })
+
+  void test('a call that beats the roster answer waits for it, then is answered', async () => {
+    const room = await openRoom('early-call', heldJoinAnswer)
+    const caller = await openCaller()
+    await caller.join('early-call')
+    // Call the moment the server says someone joined, and record closes
+    await caller.page.evaluate(() => {
+      const callerSocket = window.caller.socket
+      if (!callerSocket)
+        throw new Error('caller socket missing before user-connected')
+      callerSocket.on('user-connected', (peerId: string) => {
+        const call = window.caller.peer.call(peerId, window.caller.stream)
+        // Fires once for each track
+        call.on('stream', () => window.caller.answered.add(call.connectionId))
+        call.on('close', () => window.caller.closed.add(call.connectionId))
+      })
+    })
+
+    await room.page.click('#call') // Join; the page's roster answer is held
+
+    // The offer arrives while the roster answer is held. An incoming call
+    // has no connection until it is answered (peerjs.js: answer() starts
+    // it), so no connection and no answer here. PeerJS close() on an
+    // unanswered incoming call emits nothing (its `if (!this.open) return`
+    // guard), so an empty close set is expected queued OR refused; only the
+    // answer after release proves the call was queued, not refused.
+    await eventually(
+      () =>
+        room.page.evaluate(() =>
+          window.recorded.peerMessages.some(
+            (message) =>
+              (JSON.parse(message) as { type?: string }).type === 'OFFER'
+          )
+        ),
+      true
+    )
+    assert.equal(
+      await room.page.evaluate(() => window.recorded.peerConnections.length),
+      0
+    )
+    assert.equal(await caller.answered(), 0)
+    assert.equal(await caller.page.evaluate(() => window.caller.closed.size), 0)
+
+    // The roster answer lands: the queued call is decided and answered
+    await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+    await room.page.evaluate(() => {
+      window.releaseJoinAnswer()
+    })
+    await eventually(
+      () => room.page.evaluate(() => window.recorded.peerConnections.length),
+      1
+    )
+    await eventually(caller.answered, 1, 6_000)
+  })
+
+  void test('capture grants that arrive after Leave are stopped, not used', async () => {
+    const room = await openRoom('gated-leave', gatedCapture)
+
+    // Camera chosen before Join, so Join asks for the camera and microphone;
+    // Leave lands before either grant does
+    await room.page.click('#camera')
+    await room.page.click('#call')
+    await room.page.waitForFunction(() => window.captureGate.length >= 2)
+    await room.page.click('#call') // Leave
+    await room.page.evaluate(async () => {
+      for (const request of window.captureGate.splice(0))
+        request.resolve(await window.realGetUserMedia(request.constraints))
+    })
+
+    // The late grants are discarded: nothing they captured stays live
+    await eventually(
+      async () => (await allTrackStates(room.page)()).length,
+      2,
+      3_000
+    )
+    assert.deepEqual(await allTrackStates(room.page)(), ['ended', 'ended'])
+    assert.deepEqual(await showsCamera(room.page), { self: false, sent: [] })
+    assert.deepEqual(await controls(room.page), {
+      ...beforeJoining('gated-leave'),
+      camera: 'Turn Off Camera',
+      photoInput: false,
+      hint: ''
+    })
+  })
+
+  void test('capture grants that arrive after a failed Join are stopped, not used', async () => {
+    const room = await openRoom('gated-failed', gatedCapture)
+    // Someone already in the room holds the page's id, so Join is refused
+    const squatter = io(ready(server, 'server').url, {
+      transports: ['websocket'],
+      forceNew: true,
+      reconnection: false
+    })
+    await new Promise<void>((resolve, reject) => {
+      squatter.once('connect', () => {
+        resolve()
+      })
+      squatter.once('connect_error', reject)
+    })
+    squatter.emit('join-room', 'gated-failed', room.peerId)
+    await ready(server, 'server').waitForOutput(
+      `user: ${room.peerId} - joined: gated-failed`
+    )
+
+    // Camera chosen before Join; the grants are still held when the join
+    // fails after all retries and the page returns to Join
+    await room.page.click('#camera')
+    await room.page.click('#call')
+    await room.page.waitForFunction(() => window.captureGate.length >= 2)
+    await eventually(
+      () => controls(room.page),
+      {
+        ...beforeJoining('gated-failed'),
+        camera: 'Turn Off Camera',
+        photoInput: false,
+        hint: ''
+      },
+      20_000
+    )
+    await room.page.evaluate(async () => {
+      for (const request of window.captureGate.splice(0))
+        request.resolve(await window.realGetUserMedia(request.constraints))
+    })
+
+    // The retired grants are discarded: nothing they captured stays live
+    await eventually(
+      async () => (await allTrackStates(room.page)()).length,
+      2,
+      3_000
+    )
+    assert.deepEqual(await allTrackStates(room.page)(), ['ended', 'ended'])
+    squatter.disconnect()
+  })
+
+  for (const kind of ['video', 'audio'] as const) {
+    for (const newerJoin of [false, true]) {
+      const boundary = newerJoin ? 'a newer Join' : 'Leave'
+      void test(`${kind} rejection after ${boundary} is ignored`, async () => {
+        const name = `old-rejection-${kind}-${String(newerJoin)}`
+        const room = await openRoom(name, gatedCapture)
+        if (kind === 'video') await room.page.click('#camera')
+        await join(room)
+        await room.page.waitForFunction(() => window.captureGate.length > 0)
+        await room.page.click('#call') // Leave retires the first requests
+        if (newerJoin) {
+          await join(room)
+          await room.page.waitForFunction(
+            (count) => window.captureGate.length >= count,
+            kind === 'video' ? 4 : 2
+          )
+        }
+        await room.page.evaluate(async (kind) => {
+          const count = kind === 'video' ? 2 : 1
+          const requests = window.captureGate.splice(0)
+          for (const request of requests.slice(count))
+            request.resolve(await window.realGetUserMedia(request.constraints))
+          for (const request of requests.slice(0, count)) {
+            if (request.constraints?.[kind])
+              request.reject(new DOMException('Old denial', 'NotAllowedError'))
+            else
+              request.resolve(
+                await window.realGetUserMedia(request.constraints)
+              )
+          }
+          // Allow async capture continuations to handle the old result.
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }, kind)
+        const expected = newerJoin
+          ? inCall(name, '1st in the room')
+          : beforeJoining(name)
+        assert.deepEqual(await controls(room.page), {
+          ...expected,
+          ...(kind === 'video'
+            ? { camera: 'Turn Off Camera', photoInput: false, hint: '' }
+            : {})
+        })
+        if (newerJoin) {
+          await eventually(
+            async () =>
+              (await allTrackStates(room.page)()).filter(
+                (state) => state === 'live'
+              ).length,
+            kind === 'video' ? 2 : 1,
+            3_000
+          )
+          await room.page.click('#call')
+        }
+        await eventually(
+          async () =>
+            (await allTrackStates(room.page)()).every(
+              (state) => state === 'ended'
+            ),
+          true,
+          3_000
+        )
+      })
+    }
+  }
+
+  for (const kind of ['video', 'audio'] as const) {
+    void test(`${kind} rapid toggles retire older capture in both orders`, async () => {
+      for (const latestFirst of [false, true]) {
+        const room = await openRoom(
+          `toggle-${kind}-${String(latestFirst)}`,
+          gatedCapture
+        )
+        const button = kind === 'video' ? '#camera' : '#mute'
+        if (kind === 'video') await room.page.click(button)
+        else await room.page.click(button) // Join muted, with no pending mic
+        await join(room)
+        if (kind === 'video') {
+          await room.page.waitForFunction(() => window.captureGate.length === 2)
+          // Finish the unrelated microphone request first.
+          await room.page.evaluate(async () => {
+            const index = window.captureGate.findIndex(
+              (r) => r.constraints?.audio
+            )
+            const [request] = window.captureGate.splice(index, 1)
+            request.resolve(await window.realGetUserMedia(request.constraints))
+          })
+        } else await room.page.click(button) // First pending mic request
+        await room.page.waitForFunction(() => window.captureGate.length === 1)
+        await room.page.click(button) // Off while first request is pending
+        await room.page.click(button) // On creates the current request
+        await room.page.waitForFunction(() => window.captureGate.length === 2)
+        const states = await room.page.evaluate(async (latestFirst) => {
+          const requests = window.captureGate.splice(0)
+          const streams: MediaStream[] = []
+          for (const index of latestFirst ? [1, 0] : [0, 1]) {
+            streams[index] = await window.realGetUserMedia(
+              requests[index].constraints
+            )
+            requests[index].resolve(streams[index])
+            await new Promise((resolve) => setTimeout(resolve, 0))
+          }
+          return streams.map((stream) => stream.getTracks()[0].readyState)
+        }, latestFirst)
+        assert.deepEqual(states, ['ended', 'live'])
+        await room.page.click(button) // Stop Video or Mute
+        await eventually(
+          async () =>
+            room.page.evaluate(
+              (kind) =>
+                window.recorded.mediaStreams
+                  .flatMap((stream) => stream.getTracks())
+                  .filter((track) => track.kind === kind)
+                  .every((track) => track.readyState === 'ended'),
+              kind
+            ),
+          true,
+          3_000
+        )
+        await room.page.click('#call') // Leave stops any other capture too
+        await eventually(
+          async () =>
+            (await allTrackStates(room.page)()).every(
+              (state) => state === 'ended'
+            ),
+          true,
+          3_000
+        )
+      }
+    })
+  }
+
+  for (const kind of ['video', 'audio'] as const) {
+    void test(`${kind} grant that arrives after the choice changed is stopped, not used`, async () => {
+      const name = `choice-changed-${kind}`
+      const room = await openRoom(name, gatedCapture)
+      const button = kind === 'video' ? '#camera' : '#mute'
+      if (kind === 'video') await room.page.click(button)
+      await join(room)
+      await room.page.waitForFunction(() => window.captureGate.length > 0)
+      if (kind === 'video') {
+        // Finish the unrelated microphone request first
+        await room.page.evaluate(async () => {
+          const index = window.captureGate.findIndex(
+            (request) => request.constraints?.audio
+          )
+          const [request] = window.captureGate.splice(index, 1)
+          request.resolve(await window.realGetUserMedia(request.constraints))
+        })
+        await room.page.waitForFunction(() => window.captureGate.length === 1)
+      }
+
+      // The choice changes while the capture grant is still pending
+      await room.page.click(button)
+      await room.page.evaluate(async () => {
+        const [request] = window.captureGate.splice(0)
+        request.resolve(await window.realGetUserMedia(request.constraints))
+      })
+
+      // The late grant is stopped, never shown or sent
+      await eventually(
+        async () =>
+          room.page.evaluate(
+            (kind) =>
+              window.recorded.mediaStreams
+                .flatMap((stream) => stream.getTracks())
+                .filter((track) => track.kind === kind)
+                .map((track) => track.readyState),
+            kind
+          ),
+        ['ended'],
+        3_000
+      )
+      assert.deepEqual(await controls(room.page), {
+        ...inCall(name, '1st in the room'),
+        ...(kind === 'audio' ? { mute: 'Unmute' } : {})
+      })
+      if (kind === 'video')
+        assert.deepEqual(await showsCamera(room.page), {
+          self: false,
+          sent: []
+        })
+    })
+  }
+
+  for (const kind of ['video', 'audio'] as const) {
+    void test(`${kind} rejection from before a newer choice is ignored`, async () => {
+      const name = `choice-race-${kind}`
+      const room = await openRoom(name, gatedCapture)
+      const button = kind === 'video' ? '#camera' : '#mute'
+      if (kind === 'video') await room.page.click(button)
+      await join(room)
+      await room.page.waitForFunction(() => window.captureGate.length > 0)
+      if (kind === 'video') {
+        // Finish the unrelated microphone request first
+        await room.page.evaluate(async () => {
+          const index = window.captureGate.findIndex(
+            (request) => request.constraints?.audio
+          )
+          const [request] = window.captureGate.splice(index, 1)
+          request.resolve(await window.realGetUserMedia(request.constraints))
+        })
+        await room.page.waitForFunction(() => window.captureGate.length === 1)
+      }
+
+      // Off retires the pending request; on starts the current one
+      await room.page.click(button)
+      await room.page.click(button)
+      await room.page.waitForFunction(() => window.captureGate.length === 2)
+      await room.page.evaluate(async () => {
+        const [older, newer] = window.captureGate.splice(0)
+        older.reject(new DOMException('Old denial', 'NotAllowedError'))
+        // Let the retired rejection's continuation run first
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        newer.resolve(await window.realGetUserMedia(newer.constraints))
+      })
+
+      // The retired rejection writes no choice and shows no error; the
+      // current grant is live and used
+      assert.deepEqual(await controls(room.page), {
+        ...inCall(name, '1st in the room'),
+        ...(kind === 'video'
+          ? { camera: 'Turn Off Camera', photoInput: false, hint: '' }
+          : {})
+      })
+      await eventually(
+        async () =>
+          room.page.evaluate(
+            (kind) =>
+              window.recorded.mediaStreams
+                .flatMap((stream) => stream.getTracks())
+                .filter((track) => track.kind === kind)
+                .map((track) => track.readyState),
+            kind
+          ),
+        ['live'],
+        3_000
+      )
+      if (kind === 'video')
+        await eventually(() => showsCamera(room.page), {
+          self: true,
+          sent: []
+        })
+    })
+  }
+})
+
+void test('after losing the PeerJS server, says so and reconnects with the same id', async () => {
+  const a = await openRoom('reconnect')
+  await a.page.evaluate(() => {
+    window.recorded.peerSockets[0].close()
+  })
+  await eventually(
+    async () => (await controls(a.page)).error,
+    'Connection problem: network: Lost connection to server.'
+  )
+
+  // room.js waits out its reconnect delay before reconnecting
+  const sockets = () =>
+    a.page.evaluate(() =>
+      window.recorded.peerSockets.map((socket) => {
+        const id = new URL(socket.url).searchParams.get('id')
+        return `${String(id)} ${socket.readyState === WebSocket.OPEN ? 'open' : 'closed'}`
+      })
+    )
+  await eventually(sockets, [`${a.peerId} closed`, `${a.peerId} open`], 8_000)
+
+  // And calls work again
+  const b = await openRoom('reconnect')
+  await join(a)
+  await join(b)
+  await eventually(status(a.page), '2nd in the room')
+  await eventually(status(b.page), '2nd in the room')
+  await eventually(async () => (await controls(a.page)).error, null)
+})
+
+void test('a rerender during a pairing outage keeps Leave enabled', async () => {
+  const room = await openRoom('leave-in-outage')
+  await join(room)
+  await room.page.evaluate(() => {
+    window.recorded.peerSockets[0].close()
+  })
+  await eventually(
+    async () => (await controls(room.page)).error,
+    'Connection problem: network: Lost connection to server.'
+  )
+
+  // Mute re-renders; leaving does not require an open pairing
+  // connection, so the outage must not disable Leave
+  await room.page.click('#mute')
+  assert.equal((await controls(room.page)).call, 'Leave')
+})
+
+void test('a roster answer that arrives after Leave is ignored', async () => {
+  const room = await openRoom('stale-roster', [heldJoinAnswer, recordRoomCalls])
+  await room.page.click('#call') // First Join; its empty roster answer is held
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  await room.page.click('#call') // Leave retires that attempt
+
+  // A member joins, then the page's fresh Join is answered with them in it
+  const member = await openCaller()
+  await member.join('stale-roster')
+  await room.page.click('#call')
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 2)
+
+  // The sensitivity below assumes the stale answer is a success with an
+  // empty roster and the fresh one names the member; check both payloads
+  assert.deepEqual(await heldAnswers(room.page), [
+    [null, []],
+    [null, [await member.page.evaluate(() => window.caller.peer.id)]]
+  ])
+
+  // The stale empty answer lands first. If it loaded a roster, the member
+  // would be refused as a non-member below (line 341 prevents exactly that)
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  const memberId = await member.page.evaluate(() => window.caller.peer.id)
+  await member.call(room.peerId)
+  // Sending the offer does not wait for the room page to process it; hold
+  // the fresh answer until the call has arrived and queued behind it,
+  // or the drain below is not what answers the call
+  await eventually(
+    () => incomingCalls(room.page).then((ids) => ids.includes(memberId)),
+    true
+  )
+  // Still waiting: neither answered nor closed, with one answer held.
+  // With 341 deleted the member is already closed here, so the test fails
+  // fast with a reason instead of timing out below.
+  assert.ok(!(await closedCalls(room.page)).includes(memberId))
+  assert.ok(!(await answeredCalls(room.page)).includes(memberId))
+  assert.equal(await room.page.evaluate(() => window.heldJoinAnswers.length), 1)
+
+  // The fresh answer names the member, so their waiting call is answered
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(member.answered, 1)
+  assert.ok(!(await closedCalls(room.page)).includes(memberId))
+  assert.deepEqual(await answeredCalls(room.page), [memberId])
+  await eventually(status(room.page), '2nd in the room')
+})
+
+void test('a call from outside the room is turned down while joined', async () => {
+  const room = await openRoom('outsider', [heldJoinAnswer, recordRoomCalls])
+  await join(room)
+  // join() only waits for the server log; wait for the answer itself
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  assert.deepEqual(await heldAnswers(room.page), [[null, []]])
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(status(room.page), '1st in the room')
+
+  // The roster is loaded and empty: an outsider's offer is refused at once.
+  // The positive proof is the spy seeing the room close the outsider's
+  // incoming call (answerIfMember's refusal); the negative proof is that no
+  // stream is ever sent back (a caller-side close event cannot be the proof:
+  // peerjs.js emits nothing for a close before the call is open).
+  const outsider = await openCaller() // Never joins the room
+  await outsider.call(room.peerId)
+  const outsiderId = await outsider.page.evaluate(() => window.caller.peer.id)
+  await eventually(
+    () => closedCalls(room.page).then((ids) => ids.includes(outsiderId)),
+    true
+  )
+
+  // A member's call right after is answered, so the refusal was a decision
+  // about the outsider, not a stuck call path
+  const member = await openCaller()
+  await member.join('outsider')
+  await member.call(room.peerId)
+  const memberId = await member.page.evaluate(() => window.caller.peer.id)
+  await eventually(member.answered, 1)
+  assert.equal(await outsider.answered(), 0)
+  assert.deepEqual(await closedCalls(room.page), [outsiderId])
+  assert.ok(!(await closedCalls(room.page)).includes(memberId))
+  assert.deepEqual(await answeredCalls(room.page), [memberId])
+  await eventually(status(room.page), '2nd in the room')
+})
+
+void test('an outside call that beats the roster answer is turned down when it loads', async () => {
+  // The member joins first, so the page's held roster answer names them and
+  // the drain below decides both calls from the roster alone - not from a
+  // member-joined notification overtaking the held answer
+  const member = await openCaller()
+  await member.join('early-outsider')
+  const room = await openRoom('early-outsider', [
+    heldJoinAnswer,
+    recordRoomCalls
+  ])
+  await join(room) // Joined at the server; its roster answer is still held
+  const outsider = await openCaller() // Never joins the room
+
+  // Both calls arrive before the roster and wait for it. When it loads, the
+  // member's is answered and the outsider's is closed by the same pass, so
+  // neither is left waiting.
+  await outsider.call(room.peerId)
+  await member.call(room.peerId)
+  const outsiderId = await outsider.page.evaluate(() => window.caller.peer.id)
+  const memberId = await member.page.evaluate(() => window.caller.peer.id)
+  // Sending the offers does not wait for the room page to process them; both
+  // must have arrived (and queued) before the roster lands, or the drain
+  // loop under test never runs
+  await eventually(
+    () =>
+      incomingCalls(room.page).then(
+        (ids) => ids.includes(outsiderId) && ids.includes(memberId)
+      ),
+    true
+  )
+  // Still waiting: neither call answered nor closed, and the held answer
+  // names the member - the drain below is what decides both calls
+  assert.deepEqual(await closedCalls(room.page), [])
+  assert.deepEqual(await answeredCalls(room.page), [])
+  assert.deepEqual(await heldAnswers(room.page), [[null, [memberId]]])
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(member.answered, 1)
+  await eventually(
+    () => closedCalls(room.page).then((ids) => ids.includes(outsiderId)),
+    true
+  )
+  assert.equal(await outsider.answered(), 0)
+  assert.ok(!(await closedCalls(room.page)).includes(memberId))
+  assert.deepEqual(await answeredCalls(room.page), [memberId])
+  await eventually(status(room.page), '2nd in the room')
+})
+
+void test('a Join buffered while disconnected is cancelled by Leave', async () => {
+  const room = await openRoom('buffered-join', [
+    heldJoinAnswer,
+    recordRoomCalls
+  ])
+  await join(room)
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(status(room.page), '1st in the room')
+
+  // Leave cleanly while connected: the server forgets the page
+  const from = ready(server, 'server').output().length
+  await room.page.click('#call') // Leave
+  assert.deepEqual(await controls(room.page), beforeJoining('buffered-join'))
+  await ready(server, 'server').waitForOutput(
+    `user: ${room.peerId} - left: buffered-join`,
+    from
+  )
+
+  // Disconnect the socket: it can no longer send. Join now buffers the
+  // packet and registers its ack - observed, not inferred
+  await room.page.evaluate(() => window.roomSocket.disconnect())
+  const beforeBuffered = await room.page.evaluate(
+    () => window.joinAttempts.length
+  )
+  await room.page.click('#call') // Join, buffered
+  // Admission takes the room lock first, so the emit lands in the
+  // buffer a moment after the click
+  await room.page.waitForFunction(
+    (n) => window.joinAttempts.length > n,
+    beforeBuffered
+  )
+  assert.deepEqual(
+    await room.page.evaluate(() => {
+      const packet = window.roomSocket.sendBuffer[0]?.data as
+        unknown[] | undefined
+      return {
+        connected: window.roomSocket.connected,
+        event: packet?.[0],
+        buffered: window.roomSocket.sendBuffer.length
+      }
+    }),
+    { connected: false, event: 'join-room', buffered: 1 }
+  )
+  const attempt = await room.page.evaluate(() => window.joinAttempts.length)
+
+  // Watch the socket before Leave: the connect listener proves the
+  // replacement connection by its new id, and the outgoing hook sees
+  // every event packet the reconnect flush sends
+  const oldSocketId = await room.page.evaluate(() => {
+    window.outgoingPackets = []
+    window.roomSocket.onAnyOutgoing((event) =>
+      window.outgoingPackets.push(String(event))
+    )
+    const old = window.roomSocket.id
+    window.roomSocket.once('connect', () => {
+      window.reconnectedAs = window.roomSocket.id
+    })
+    return old
+  })
+
+  // Leave retires the attempt and purges its buffered Join: observed
+  // synchronously inside the click, before any reconnect flush
+  const flushed = ready(server, 'server').output().length
+  assert.deepEqual(
+    await room.page.evaluate(() => {
+      document.querySelector<HTMLElement>('#call')?.click()
+      return window.roomSocket.sendBuffer.map(
+        (packet) => (packet.data as unknown[])[0]
+      )
+    }),
+    []
+  )
+  assert.deepEqual(await controls(room.page), beforeJoining('buffered-join'))
+
+  // The purged attempt's acknowledgement still resolves: its timeout
+  // error, in this already-disconnected state. The error alone would
+  // not prove cancellation; the purge assertion above and the flush
+  // log below do that
+  await room.page.waitForFunction(
+    (id) => window.joinAttempts[id - 1]?.outcome !== undefined,
+    attempt
+  )
+  const outcome = await room.page.evaluate(
+    (id) => window.joinAttempts[id - 1].outcome,
+    attempt
+  )
+  assert.ok(outcome && 'error' in outcome)
+  assert.match(outcome.error, /timed out/)
+
+  // The replacement connection is a new socket whose flush carried no
+  // join-room, and the server never re-adds the page
+  await room.page.waitForFunction(
+    (old) => window.reconnectedAs !== undefined && window.reconnectedAs !== old,
+    oldSocketId
+  )
+  assert.deepEqual(
+    await room.page.evaluate(() =>
+      window.outgoingPackets.filter((event) => event === 'join-room')
+    ),
+    []
+  )
+  assert.ok(
+    !ready(server, 'server')
+      .output()
+      .slice(flushed)
+      .includes(`user: ${room.peerId} - joined: buffered-join`)
+  )
+
+  // A later joiner: the server does not name the departed page
+  const joiner = await openRoom('buffered-join', [
+    heldJoinAnswer,
+    recordRoomCalls
+  ])
+  await join(joiner)
+  await joiner.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  assert.deepEqual(await heldAnswers(joiner.page), [[null, []]])
+  await joiner.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+
+  // The page's next Join is a first Join again: the participant hears
+  // the announcement and calls the page itself. The call records are
+  // cleared before the rejoin click, so a call from the phantom era
+  // could not satisfy this
+  await joiner.page.evaluate(() => {
+    window.outgoingConns.length = 0
+  })
+  await room.page.click('#call') // Join again
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  assert.deepEqual(await heldAnswers(room.page), [[null, [joiner.peerId]]])
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await joiner.page.waitForFunction(
+    (peerId) => window.outgoingConns.some((conn) => conn.peer === peerId),
+    room.peerId
+  )
+  await room.page.waitForFunction(
+    (peerId) => window.answeredCalls.includes(peerId),
+    joiner.peerId
+  )
+  await eventually(status(room.page), '2nd in the room')
+})
+
+void test('a Join pending when the room connection dies uncleanly is retired and never flushed', async () => {
+  const room = await openRoom('unclean-death', heldJoinAnswer)
+  await room.page.waitForFunction(
+    () => !document.querySelector<HTMLButtonElement>('#call')?.disabled
+  )
+
+  // Admission is Pending while the room-lock step runs; the transport
+  // drops abruptly in the same task, before any Join packet can leave
+  const from = ready(server, 'server').output().length
+  await room.page.evaluate(() => {
+    document.querySelector<HTMLElement>('#call')?.click()
+    window.roomSocket.io.engine.close()
+  })
+
+  // The synchronous disconnect dispatch retired the admission: nothing
+  // buffered survives, capture stops, and the page shows the Lost state
+  // with Join available again
+  await eventually(status(room.page), 'Connection lost - press Join to rejoin')
+
+  // The room connection returns on a new socket; the retired attempt
+  // never flushed a Join onto it
+  await ready(server, 'server').waitForOutput('- connected', from)
+  assert.ok(
+    !ready(server, 'server')
+      .output()
+      .slice(from)
+      .includes('- joined: unclean-death')
+  )
+
+  // The retired attempt released the room lock: a second tab can take
+  // the room while this page still waits for its fresh Join click
+  const second = await openRoom('unclean-death')
+  await join(second)
+  await eventually(status(second.page), '1st in the room')
+  await second.page.click('#call') // Leave, returning the lock
+  await eventually(status(second.page), 'Press Join to start the call')
+
+  // A fresh Join click on the retired page runs the full admission path
+  await room.page.click('#call')
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(status(room.page), '1st in the room')
+})
+
+void test('a Join buffered without Leave succeeds on its original attempt', async () => {
+  const room = await openRoom('buffered-rejoin', [
+    heldJoinAnswer,
+    recordRoomCalls
+  ])
+  await join(room)
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(status(room.page), '1st in the room')
+
+  const left = ready(server, 'server').output().length
+  await room.page.click('#call') // Leave
+  await ready(server, 'server').waitForOutput(
+    `user: ${room.peerId} - left: buffered-rejoin`,
+    left
+  )
+
+  await room.page.evaluate(() => window.roomSocket.disconnect())
+  const beforeBuffered = await room.page.evaluate(
+    () => window.joinAttempts.length
+  )
+  await room.page.click('#call') // Join, buffered
+  // Admission takes the room lock first, so the emit lands in the
+  // buffer a moment after the click
+  await room.page.waitForFunction(
+    (n) => window.joinAttempts.length > n,
+    beforeBuffered
+  )
+  const attempt = await room.page.evaluate(() => window.joinAttempts.length)
+  assert.deepEqual(
+    await room.page.evaluate(() => window.roomSocket.sendBuffer.length),
+    1
+  )
+
+  // No Leave: the original attempt stays live, the reconnect flushes
+  // it, and its own answer arrives - no timeout recorded
+  await room.page.evaluate(() => window.roomSocket.connect())
+  await room.page.waitForFunction(
+    (id) => window.joinAttempts[id - 1]?.outcome !== undefined,
+    attempt
+  )
+  const outcome = await room.page.evaluate(
+    (id) => window.joinAttempts[id - 1].outcome,
+    attempt
+  )
+  assert.ok(outcome && 'answer' in outcome)
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(status(room.page), '1st in the room')
+})
+
+void test('a buffered Join lost before reconnect is retried, its loss recorded', async () => {
+  const room = await openRoom('buffered-loss', [
+    heldJoinAnswer,
+    recordRoomCalls
+  ])
+  await join(room)
+  await room.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(status(room.page), '1st in the room')
+
+  const left = ready(server, 'server').output().length
+  await room.page.click('#call') // Leave
+  await ready(server, 'server').waitForOutput(
+    `user: ${room.peerId} - left: buffered-loss`,
+    left
+  )
+
+  await room.page.evaluate(() => window.roomSocket.disconnect())
+  const beforeBuffered = await room.page.evaluate(
+    () => window.joinAttempts.length
+  )
+  await room.page.click('#call') // Join, buffered
+  // Admission takes the room lock first, so the emit lands in the
+  // buffer a moment after the click
+  await room.page.waitForFunction(
+    (n) => window.joinAttempts.length > n,
+    beforeBuffered
+  )
+  const attempt = await room.page.evaluate(() => window.joinAttempts.length)
+
+  // The test itself drops the packet, the over-purge the control above
+  // exists to catch: the original attempt can only time out, and the
+  // retry loop still joins the page about 7 seconds later
+  await room.page.evaluate(() => {
+    window.roomSocket.sendBuffer.length = 0
+    window.roomSocket.connect()
+  })
+  await room.page.waitForFunction(
+    (id) => window.joinAttempts[id - 1]?.outcome !== undefined,
+    attempt
+  )
+  const lost = await room.page.evaluate(
+    (id) => window.joinAttempts[id - 1].outcome,
+    attempt
+  )
+  assert.ok(lost && 'error' in lost)
+  assert.match(lost.error, /timed out/)
+
+  // The retry's own tagged attempt succeeds on a fresh answer
+  await room.page.waitForFunction(
+    (id) =>
+      window.joinAttempts.length > id && window.heldJoinAnswers.length === 1,
+    attempt
+  )
+  assert.deepEqual(await heldAnswers(room.page), [[null, []]])
+  await room.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await eventually(status(room.page), '1st in the room')
+})
+
+void test('a page that has not joined makes no call when a joiner is announced', async () => {
+  const room = await openRoom('stray-member', [heldJoinAnswer, recordRoomCalls])
+
+  // Register the page at the server directly, while it shows Join: no
+  // callback, so the server joins the socket without replying
+  await room.page.evaluate(
+    ({ name, peerId }) => {
+      window.roomSocket.emit('join-room', name, peerId)
+    },
+    { name: room.name, peerId: room.peerId }
+  )
+  await ready(server, 'server').waitForOutput(
+    `user: ${room.peerId} - joined: stray-member`
+  )
+
+  // The page's own handler runs first, so by the time this listener
+  // records the announcement any call it made would be recorded too
+  await room.page.evaluate(() => {
+    window.announcedPeers = []
+    window.roomSocket.on('user-connected', (peerId) => {
+      window.announcedPeers.push(String(peerId))
+    })
+  })
+
+  const joiner = await openRoom('stray-member', [
+    heldJoinAnswer,
+    recordRoomCalls
+  ])
+  await join(joiner)
+  await joiner.page.waitForFunction(() => window.heldJoinAnswers.length === 1)
+  // Positive control: the roster names the page
+  assert.deepEqual(await heldAnswers(joiner.page), [[null, [room.peerId]]])
+  await joiner.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+
+  // The announcement reached the page - and it made no call. Without
+  // the joined guard this fails with the joiner's id recorded, which
+  // doubles as the call-recording hook's positive control
+  await room.page.waitForFunction(
+    (peerId) => window.announcedPeers.includes(peerId),
+    joiner.peerId
+  )
+  assert.deepEqual(
+    await room.page.evaluate(() =>
+      window.outgoingConns.map((conn) => conn.peer)
+    ),
+    []
+  )
+})
+
+void test('the served socket.io bundle matches what room admission depends on', async () => {
+  // Admission reads socket.io's internal sendBuffer for the Leave and
+  // disconnect purges and the Manager's reconnect_failed for transport
+  // exhaustion, so a bundle change must fail here and force a fresh look
+  // at all of them. The pin is the served file, not the npm package
+  const response = await fetch(
+    `${ready(server, 'server').url}/socket.io/socket.io.min.js`
+  )
+  const hash = createHash('sha256')
+    .update(Buffer.from(await response.arrayBuffer()))
+    .digest('hex')
+  assert.equal(
+    hash,
+    'd5d79a35039e860b32bdef4795528b05c2f788d4b2d9dacc913120e2878f7b3f'
+  )
+})
+
+void test('the served pairing-library bundle matches what message retention depends on', async () => {
+  // Retention hooks the pairing library's internals: _getMessages returns
+  // a connection's retained messages and deletes them, getConnection looks
+  // a live connection up by peer and connection IDs, the socket message
+  // listener the constructor registered runs before the ledger's own, an
+  // unanswered call's close() emits nothing, _removeConnection drops the
+  // store with the connection, and answer() replays through the same
+  // _getMessages extraction. A bundle change must fail here and force a
+  // fresh look at all of them. The pin is the served file, not the npm
+  // package
+  const response = await fetch(
+    `${ready(server, 'server').url}/vendor/peerjs.min.js`
+  )
+  const hash = createHash('sha256')
+    .update(Buffer.from(await response.arrayBuffer()))
+    .digest('hex')
+  assert.equal(
+    hash,
+    '7604d8c31bec4f134b0d15c2d80b1d095ea18af005354f439f14291fcd7b4168'
+  )
+})
+
+void test('the photo chooser is reached with Tab and opened from the keyboard', async () => {
+  const { page } = await openRoom('photo-keyboard')
+  const focused = () => page.evaluate(() => document.activeElement?.id)
+
+  // Every control takes its turn, the photo chooser included
+  const order: (string | undefined)[] = []
+  for (let presses = 0; presses < 4; presses++) {
+    await page.keyboard.press('Tab')
+    order.push(await focused())
+  }
+  assert.deepEqual(order, ['mute', 'camera', 'call', 'photo'])
+
+  // Its focus shows on the preview that opens it, in the page's text color
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const ring = getComputedStyle(document.querySelector('#self') as Element)
+      return {
+        style: ring.outlineStyle,
+        width: ring.outlineWidth,
+        inTextColor: ring.outlineColor === getComputedStyle(document.body).color
+      }
+    }),
+    { style: 'solid', width: '2px', inTextColor: true }
+  )
+
+  // Enter and Space each open the file chooser
+  for (const key of ['Enter', 'Space']) {
+    const chooser = page.waitForEvent('filechooser')
+    // A round trip first, so the chooser is watched before the key lands
+    assert.equal(await focused(), 'photo')
+    await page.keyboard.press(key)
+    await chooser
+  }
+
+  // With the camera on there is no photo to choose, so Tab passes it by
+  await page.click('#camera')
+  await page.focus('#call')
+  await page.keyboard.press('Tab')
+  assert.notEqual(await focused(), 'photo')
+})
+
+void test('turning the camera back on captures a fresh track', async () => {
+  const room = await openRoom('camera-re-on')
+  await room.page.click('#camera') // Chosen before Join
+  await join(room)
+  await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+
+  await room.page.click('#camera') // Off: the live track is stopped
+  await eventually(() => showsCamera(room.page), { self: false, sent: [] })
+
+  await room.page.click('#camera') // On again: the ended track is replaced
+  await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+
+  // One ended video track from the first capture, one live from the second
+  const videoStates = () =>
+    room.page.evaluate(() =>
+      window.recorded.mediaStreams
+        .flatMap((stream) => stream.getVideoTracks())
+        .map((track) => track.readyState)
+    )
+  assert.deepEqual((await videoStates()).sort(), ['ended', 'live'])
+})
+
+void test('a browser without Web Locks cannot join, and says so', async () => {
+  const context = await ready(browser, 'browser').newContext({
+    baseURL: ready(server, 'server').url
+  })
+  contexts.push(context)
+  await context.addInitScript(record)
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'locks', {
+      value: undefined,
+      configurable: true
+    })
+  })
+  const page = await context.newPage()
+  await page.goto('/room/no-locks')
+
+  // The unsupported state blocks Join with its own error, distinct from the
+  // same-name-tab Blocked state
+  const errorShows = async () =>
+    ((await page.locator('#error').textContent()) ?? '').includes(
+      'Pinto needs the Web Locks API to keep one tab per room, and this browser does not have it. Joining is disabled.'
+    )
+  await eventually(errorShows, true, 10_000)
+
+  // The button must stay disabled even with the pairing connection open:
+  // wait for the peer server's OPEN message, which room.js answers with a
+  // render, so the disabled check cannot pass on peer-not-open alone
+  const peerOpened = async () =>
+    page.evaluate(() =>
+      window.recorded.peerMessages.some((message) =>
+        message.includes('"type":"OPEN"')
+      )
+    )
+  await eventually(peerOpened, true, 10_000)
+  assert.equal(await page.locator('#call').isDisabled(), true)
+})
+
+void test('a room connection that never opens exhausts into the connection-error state', async () => {
+  const context = await ready(browser, 'browser').newContext({
+    baseURL: ready(server, 'server').url
+  })
+  context.setDefaultTimeout(10_000)
+  contexts.push(context)
+  await context.addInitScript(record)
+  // The room transport cannot establish: polling aborted, websocket closed
+  await context.route(/\/socket\.io\/\?/, (route) => route.abort())
+  await context.routeWebSocket(/socket\.io/, (ws) => ws.close())
+  const page = await context.newPage()
+  const idResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/peerjs/id'
+  )
+  const from = ready(server, 'server').output().length
+  await page.goto('/room/never-opens')
+  await idResponse
+
+  // Six attempts come and go, then the page says so instead of showing a
+  // normal prompt that could never work
+  const errorShows = async () =>
+    ((await page.locator('#error').textContent()) ?? '').includes(
+      'The connection to the room could not be restored. Press Join to try again.'
+    )
+  await eventually(errorShows, true, 30_000)
+  assert.equal(await status(page)(), 'Press Join to start the call')
+
+  // No connection ever reached the server, and no seventh attempt follows
+  assert.ok(
+    !ready(server, 'server').output().slice(from).includes('- connected')
+  )
+  await sleep(1_000)
+  assert.ok(
+    !ready(server, 'server').output().slice(from).includes('- connected')
+  )
+})
+
+void test('a fresh Join after transport exhaustion re-opens the connection and joins', async () => {
+  const context = await ready(browser, 'browser').newContext({
+    baseURL: ready(server, 'server').url
+  })
+  context.setDefaultTimeout(10_000)
+  contexts.push(context)
+  await context.addInitScript(record)
+  await context.route(/\/socket\.io\/\?/, (route) => route.abort())
+  await context.routeWebSocket(/socket\.io/, (ws) => ws.close())
+  const page = await context.newPage()
+  const idResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/peerjs/id'
+  )
+  const from = ready(server, 'server').output().length
+  await page.goto('/room/exhausted-rejoin')
+  const peerId = (await (await idResponse).text()).trim()
+
+  // Exhaustion first, then the network returns; the fresh Join click
+  // re-opens the terminal transport and runs the full admission path
+  const errorShows = async () =>
+    ((await page.locator('#error').textContent()) ?? '').includes(
+      'The connection to the room could not be restored. Press Join to try again.'
+    )
+  await eventually(errorShows, true, 30_000)
+  await context.unrouteAll()
+  await page.click('#call')
+  await eventually(status(page), '1st in the room', 30_000)
+
+  // Exactly one new connection carried exactly one admission, and it is
+  // this page's: no stale packet rode the revival
+  const out = ready(server, 'server').output().slice(from)
+  assert.equal(
+    out.split('\n').filter((l) => l.includes('- connected')).length,
+    1
+  )
+  assert.ok(out.includes(`user: ${peerId} - joined: exhausted-rejoin`))
+  assert.equal(out.split('\n').filter((l) => l.includes('- joined')).length, 1)
+})
+
+void test('a second tab joining the same room is Blocked and never emits', async () => {
+  // Two tabs of one browser: one shared context, so the room lock
+  // (Web Locks, per storage partition) covers both pages
+  const context = await ready(browser, 'browser').newContext({
+    baseURL: ready(server, 'server').url
+  })
+  context.setDefaultTimeout(10_000)
+  contexts.push(context)
+  await context.addInitScript(record)
+  const openTab = async (): Promise<Room> => {
+    const page = await context.newPage()
+    const idResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/peerjs/id'
+    )
+    await page.goto('/room/two-tabs')
+    const peerId = (await (await idResponse).text()).trim()
+    await page.locator('#call:enabled').waitFor()
+    return { page, name: 'two-tabs', peerId }
+  }
+  const first = await openTab()
+  await join(first)
+
+  // The room lock refuses the second tab's Join before any packet leaves:
+  // the Blocked state, Join disabled, a Try again link, and no emission
+  const second = await openTab()
+  const from = ready(server, 'server').output().length
+  await second.page.click('#call')
+  await eventually(status(second.page), 'This room is open in another tab')
+  await second.page.locator('#call:disabled').waitFor()
+  await second.page.locator('#error a', { hasText: 'Try again' }).waitFor()
+  assert.ok(
+    !ready(server, 'server').output().slice(from).includes('- joined: two-tabs')
+  )
+
+  // Once the first tab leaves, the lock is free: the second tab's
+  // Try again reloads it, and its fresh Join completes admission
+  const left = ready(server, 'server').output().length
+  await first.page.click('#call')
+  await ready(server, 'server').waitForOutput(
+    `user: ${first.peerId} - left: two-tabs`,
+    left
+  )
+  const retryId = second.page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/peerjs/id'
+  )
+  await second.page.click('#error a')
+  const retryPeerId = (await (await retryId).text()).trim()
+  await second.page.locator('#call:enabled').waitFor()
+  await join({ page: second.page, name: 'two-tabs', peerId: retryPeerId })
+})
+
+void test('a room link with a trailing slash joins the same room', async () => {
+  const page = await newPage()
+  const idResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === '/peerjs/id'
+  )
+  // One final literal slash is link formatting, not part of the name
+  await page.goto('/room/trailing-slash-link/')
+  const peerId = await (await idResponse).text()
+  await page.locator('#call:enabled').waitFor()
+  const from = ready(server, 'server').output().length
+  await page.click('#call')
+  await ready(server, 'server').waitForOutput(
+    `user: ${peerId} - joined: trailing-slash-link`,
+    from
+  )
+  assert.equal((await controls(page)).heading, 'You are in trailing-slash-link')
+})
+
+void test('a caller receives one video track and one audio track from the room', async () => {
+  const room = await openRoom('track-count')
+  await join(room)
+  const caller = await openCaller()
+  await caller.join(room.name)
+  await caller.page.evaluate((peerId) => {
+    const call = window.caller.peer.call(peerId, window.caller.stream)
+    call.on('stream', (stream) => {
+      ;(window.caller as unknown as { received: string[] }).received = stream
+        .getTracks()
+        .map((track) => track.kind)
+        .sort()
+    })
+  }, room.peerId)
+  // What peers receive: one video track (camera or photo) and one audio
+  // track (microphone or silence)
+  await eventually(
+    () =>
+      caller.page.evaluate(
+        () => (window.caller as unknown as { received?: string[] }).received
+      ),
+    ['audio', 'video'],
+    15_000
+  )
+})
+
+void test('a camera track stopped from outside the controls shows the camera as off', async () => {
+  const name = 'camera-stopped'
+  const room = await openRoom(name)
+  await room.page.click('#camera') // Chosen before Join
+  await join(room)
+  await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+
+  // A stop from script fires no ended event; nothing else tells the page
+  await room.page.evaluate(() => {
+    for (const stream of window.recorded.mediaStreams)
+      for (const track of stream.getVideoTracks()) track.stop()
+  })
+  await eventually(
+    () => room.page.textContent('#camera'),
+    'Turn On Camera',
+    5_000
+  )
+  // Shown as off, with no error and the call otherwise as it was
+  assert.deepEqual(await controls(room.page), inCall(name, '1st in the room'))
+  assert.deepEqual(await showsCamera(room.page), { self: false, sent: [] })
+
+  // Turn On Camera captures again
+  await room.page.click('#camera')
+  await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+})
+
+void test('a camera that ends on its own shows as off at once, and the call gets the photo again', async () => {
+  const a = await openRoom('camera-ended')
+  const b = await openRoom('camera-ended')
+  await a.page.click('#camera') // Chosen before Join
+  await join(a)
+  await join(b)
+  await eventually(() => showsCamera(a.page), { self: true, sent: [true] })
+
+  // A device that goes away ends the track and fires ended on it
+  const label = await a.page.evaluate(() => {
+    const track = window.recorded.media?.getVideoTracks()[0]
+    track?.stop()
+    track?.dispatchEvent(new Event('ended'))
+    return document.getElementById('camera')?.textContent
+  })
+  assert.equal(label, 'Turn On Camera')
+  await eventually(() => showsCamera(a.page), { self: false, sent: [false] })
+})
+
+void test('Leave keeps the camera choice: its stopped track is not taken for one that ended', async () => {
+  const name = 'camera-kept'
+  const room = await openRoom(name)
+  await room.page.click('#camera') // Chosen before Join
+  await join(room)
+  await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+
+  await room.page.click('#call')
+  // Longer than the page's one-second look for an ended camera
+  await sleep(1_500)
+  assert.deepEqual(await controls(room.page), {
+    ...beforeJoining(name),
+    camera: 'Turn Off Camera',
+    photoInput: false,
+    hint: ''
+  })
+})
+
+void test('a camera turned off and on again is not taken for one that ended while its new grant is pending', async () => {
+  const name = 'camera-regrant'
+  const room = await openRoom(name, gatedCapture)
+  const grant = () =>
+    room.page.evaluate(async () => {
+      for (const request of window.captureGate.splice(0))
+        request.resolve(await window.realGetUserMedia(request.constraints))
+    })
+  await room.page.click('#camera') // Chosen before Join
+  await join(room)
+  await room.page.waitForFunction(() => window.captureGate.length === 2)
+  await grant()
+  await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+
+  await room.page.click('#camera') // Off: the live track is stopped
+  await room.page.click('#camera') // On again: the new grant is held
+  await room.page.waitForFunction(() => window.captureGate.length === 1)
+  // Longer than the page's one-second look for an ended camera
+  await sleep(1_500)
+
+  await grant()
+  await eventually(() => showsCamera(room.page), { self: true, sent: [] })
+  assert.equal(await room.page.textContent('#camera'), 'Turn Off Camera')
+})
+
+for (const kind of ['video', 'audio']) {
+  void test(`a failed ${kind} update ends only that call and shows the failure`, async () => {
+    const a = await openRoom('failed-media-update', recordRoomCalls)
+    const b = await openRoom('failed-media-update')
+    const c = await openRoom('failed-media-update')
+    await join(a)
+    await join(b)
+    await join(c)
+    await eventually(status(a.page), '3rd in the room')
+    if (kind === 'audio') await a.page.click('#mute')
+    await a.page.evaluate(
+      ({ peerId, kind }) => {
+        const call = window.outgoingConns.find((each) => each.peer === peerId)
+        assertCall(call)
+        const sender = call.peerConnection
+          .getSenders()
+          .find((each) => each.track?.kind === kind)
+        if (!sender) throw Error('missing video sender')
+        sender.replaceTrack = () =>
+          Promise.reject(Error('injected replacement failure'))
+        function assertCall(
+          value: unknown
+        ): asserts value is import('peerjs').MediaConnection {
+          if (!value) throw Error('missing outgoing call')
+        }
+      },
+      { peerId: b.peerId, kind }
+    )
+    await a.page.click(kind === 'video' ? '#camera' : '#mute')
+    await eventually(
+      async () => (await controls(a.page)).error,
+      'Call connection: A media update failed. This call ended: injected replacement failure'
+    )
+    await eventually(status(a.page), '2nd in the room')
+    assert.equal(
+      await a.page.evaluate(
+        (id) => window.outgoingConns.find((each) => each.peer === id)?.open,
+        c.peerId
+      ),
+      true
+    )
+  })
+}
+
+void test('call loss warns, recovery clears only that warning, and Leave is quiet', async () => {
+  const a = await openRoom('call-loss-warning', recordRoomCalls)
+  const b = await openRoom('call-loss-warning')
+  await join(a)
+  await join(b)
+  await eventually(status(a.page), '2nd in the room')
+  await a.page.evaluate(() =>
+    window.outgoingConns[0].emit('iceStateChanged', 'disconnected')
+  )
+  await eventually(
+    async () => (await controls(a.page)).error,
+    'Call connection: A call was interrupted. Waiting for its connection to recover.'
+  )
+  await a.page.evaluate(() =>
+    window.outgoingConns[0].emit('iceStateChanged', 'connected')
+  )
+  await eventually(async () => (await controls(a.page)).error, null)
+  await a.page.click('#call')
+  assert.equal((await controls(a.page)).error, null)
+  assert.equal((await controls(b.page)).error, null)
+})
+
+void test('a terminal call failure is shown and the call removed', async () => {
+  const a = await openRoom('call-terminal-warning', recordRoomCalls)
+  const b = await openRoom('call-terminal-warning')
+  await join(a)
+  await join(b)
+  await eventually(status(a.page), '2nd in the room')
+  await a.page.evaluate(() => {
+    const pc = window.outgoingConns[0].peerConnection
+    Object.defineProperty(pc, 'iceConnectionState', { get: () => 'failed' })
+    pc.dispatchEvent(new Event('iceconnectionstatechange'))
+  })
+  await eventually(
+    async () => (await controls(a.page)).error,
+    'Call connection: A call connection failed. The call ended.'
+  )
+  await eventually(status(a.page), '1st in the room')
+})
+
+void test('pairing recovery keeps an unrelated media error visible', async () => {
+  const a = await openRoom('pairing-warning-with-media')
+  await join(a)
+  await a.page.evaluate(() => {
+    navigator.mediaDevices.getUserMedia = () =>
+      Promise.reject(Error('injected capture failure'))
+  })
+  await a.page.click('#camera')
+  await eventually(
+    async () => (await controls(a.page)).error,
+    "Camera and microphone: Pinto can't reach your camera or microphone: injected capture failure"
+  )
+  await a.page.evaluate(() => {
+    window.recorded.peerSockets[0].close()
+  })
+  await a.page.waitForFunction(
+    () =>
+      window.recorded.peerSockets.length === 2 &&
+      window.recorded.peerSockets[1].readyState === WebSocket.OPEN
+  )
+  await eventually(
+    async () => (await controls(a.page)).error,
+    "Camera and microphone: Pinto can't reach your camera or microphone: injected capture failure"
+  )
+})
+
+/** Failure-only evidence; never change an assertion or wait for capture. */
+async function withCallFailureDiagnostics(
+  run: (rooms: Room[]) => Promise<void>
+) {
+  const rooms: Room[] = []
+  try {
+    await run(rooms)
+  } catch (error) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      // Log the original failure before any fallible browser read. This helper
+      // server clears KEY and Twilio credentials; never log raw pairing payloads.
+      console.error('Call-state assertion', String(error).slice(0, 4000))
+      console.error(
+        'Call-state server',
+        JSON.stringify(
+          ready(server, 'server')
+            .output()
+            .split('\n')
+            .filter((line) => rooms.some((room) => line.includes(room.peerId)))
+            .slice(-30)
+        )
+      )
+      await Promise.race([
+        Promise.allSettled(
+          rooms.flatMap((room) => [
+            controls(room.page).then((value) => {
+              console.error(
+                'Call-state controls',
+                room.peerId,
+                JSON.stringify(value)
+              )
+              return null
+            }),
+            room.page
+              .evaluate(() => ({
+                sockets: window.recorded.peerSockets
+                  .slice(-10)
+                  .map((socket) => socket.readyState),
+                messageTypes: window.recorded.peerMessages
+                  .slice(-10)
+                  .map((message) => {
+                    const parsed = JSON.parse(message) as { type?: unknown }
+                    return typeof parsed.type === 'string'
+                      ? parsed.type
+                      : 'unknown'
+                  }),
+                calls: ((window as Partial<Window>).outgoingConns ?? [])
+                  .slice(-10)
+                  .map((call) => {
+                    const connection =
+                      call.peerConnection as RTCPeerConnection | null
+                    return {
+                      peer: call.peer,
+                      connectionId: call.connectionId,
+                      open: call.open,
+                      connectionState: connection?.connectionState ?? null,
+                      iceConnectionState: connection?.iceConnectionState ?? null
+                    }
+                  })
+              }))
+              .then((value) => {
+                console.error(
+                  'Call-state connections',
+                  room.peerId,
+                  JSON.stringify(value)
+                )
+                return null
+              })
+          ])
+        ),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(Error('diagnostic capture timed out'))
+          }, 2000)
+        })
+      ])
+    } catch {
+      // Capture is best-effort; only the original failure decides the test.
+    } finally {
+      clearTimeout(timer)
+    }
+    throw error
+  }
+}
+
+void test('a late failed media update cannot end a replacement call', async () => {
+  await withCallFailureDiagnostics(async (rooms) => {
+    const a = await openRoom('late-media-failure', recordRoomCalls)
+    rooms.push(a)
+    const b = await openRoom('late-media-failure')
+    rooms.push(b)
+    await join(a)
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+    const rejectUpdate = await a.page.evaluateHandle(() => {
+      const sender = window.outgoingConns[0].peerConnection
+        .getSenders()
+        .find((each) => each.track?.kind === 'video')
+      if (!sender) throw Error('missing video sender')
+      let rejectUpdate: (error: Error) => void = () => {
+        throw Error('replacement was not requested')
+      }
+      sender.replaceTrack = () =>
+        new Promise((_resolve, reject) => {
+          rejectUpdate = reject
+        })
+      return () => {
+        rejectUpdate(Error('late old failure'))
+      }
+    })
+    await a.page.click('#camera')
+    await a.page.click('#call')
+    await eventually(status(b.page), '1st in the room')
+    // B initiates the replacement call after A rejoins.
+    await join(a)
+    await eventually(status(a.page), '2nd in the room')
+    await rejectUpdate.evaluate((reject) => {
+      reject()
+    })
+    assert.equal((await controls(a.page)).error, null)
+    assert.equal(await status(a.page)(), '2nd in the room')
+    await rejectUpdate.dispose()
+  })
+})
+
+void test('losing a remote room transport warns and preserves an unrelated call', async () => {
+  await withCallFailureDiagnostics(async (rooms) => {
+    // Phase markers and streamed record lines keep evidence even when an
+    // outside kill ends the run; lines still in flight at the kill are lost
+    const phase = (name: string) => {
+      console.log(`C8a phase: ${name}`)
+    }
+    phase('setup: open a')
+    const a = await openRoom('remote-room-loss', [recordCallTimeline])
+    rooms.push(a)
+    // Stream the observed page's record lines and page errors as they
+    // happen; filtered to the recorder's own prefix, this page only
+    a.page.on('console', (message) => {
+      const text = message.text()
+      if (text.startsWith('Call-timeline-')) console.log(text)
+    })
+    a.page.on('pageerror', (error) => {
+      console.log(`C8a pageerror: ${String(error)}`)
+    })
+    phase('setup: open b')
+    const b = await openRoom('remote-room-loss')
+    rooms.push(b)
+    phase('setup: open c')
+    const c = await openRoom('remote-room-loss')
+    rooms.push(c)
+    phase('setup: joins')
+    await join(a)
+    await join(b)
+    await join(c)
+    await eventually(status(a.page), '3rd in the room')
+    const timeline = () =>
+      a.page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              callTimeline: {
+                event: string
+                conn?: string
+                errorAfter?: string | null
+                statusAfter?: string | null
+              }[]
+            }
+          ).callTimeline
+      )
+    const bConnectionId = () =>
+      a.page.evaluate(
+        (id) =>
+          window.outgoingConns.find((each) => each.peer === id)?.connectionId,
+        b.peerId
+      )
+    phase('probe: recorder close path')
+    // Isolated deterministic self-check of the close capture: a scratch
+    // connection-shaped object (no live call touched) gets the recorder's
+    // own close listener, then a REAL close event is dispatched the way
+    // super.emit dispatches it - through the first prototype holding emit,
+    // which the instance emit shadow cannot see. The record must gain it.
+    const probed = await a.page.evaluate(() => {
+      const w = window as unknown as {
+        outgoingConns: {
+          connectionId: string
+          on: (event: 'close', fn: () => void) => unknown
+        }[]
+        recordCallTimelineClose: (
+          conn: (typeof w.outgoingConns)[number]
+        ) => void
+      }
+      const real = w.outgoingConns[0]
+      const scratch = Object.create(Object.getPrototypeOf(real) as object) as {
+        connectionId: string
+        _events: Record<string, unknown>
+        _eventsCount: number
+      }
+      scratch.connectionId = 'recorder-probe-conn'
+      scratch._events = Object.create(null) as Record<string, unknown>
+      scratch._eventsCount = 0
+      w.recordCallTimelineClose(
+        scratch as unknown as (typeof w.outgoingConns)[number]
+      )
+      let holder: object | null = real
+      let bypassEmit: ((event: string) => unknown) | undefined
+      while (
+        (holder = Object.getPrototypeOf(holder) as object | null) !== null
+      ) {
+        if (Object.hasOwn(holder, 'emit')) {
+          bypassEmit = (holder as { emit: (event: string) => unknown }).emit
+          break
+        }
+      }
+      bypassEmit?.call(scratch, 'close')
+      return scratch.connectionId
+    })
+    await eventually(
+      async () =>
+        (await timeline()).some(
+          (entry) => entry.event === 'close' && entry.conn === probed
+        ),
+      true
+    )
+    phase('offline: emulate')
+    const cdp = await b.page.context().newCDPSession(b.page)
+    await cdp.send('Network.enable')
+    await cdp.send('Network.emulateNetworkConditions', {
+      offline: true,
+      latency: 0,
+      downloadThroughput: 0,
+      uploadThroughput: 0
+    })
+    phase('offline: emulated')
+    // b's call was placed when b joined: its connectionId is already fixed
+    phase('id: lost member connection')
+    const lostId = await bConnectionId()
+    // The record is evidence on either outcome and the page is destroyed
+    // at cleanup: dump it through the console channel the diagnostics use.
+    // Instrumentation never decides the outcome: a dump failure is logged,
+    // not thrown
+    const dump = async () => {
+      try {
+        const entries = await timeline()
+        console.log(`Call-timeline ${JSON.stringify(entries)}`)
+      } catch (dumpError) {
+        console.log(`Call-timeline dump failed: ${String(dumpError)}`)
+      }
+    }
+    try {
+      phase('wait: waiting record')
+      // The approved linger: the frozen tile waits while the loss is
+      // declared. The record persists even if the live notice is replaced
+      // between polls.
+      await eventually(
+        async () =>
+          (await timeline()).some(
+            (entry) =>
+              entry.errorAfter?.includes(
+                'Waiting for its connection to recover'
+              ) && entry.statusAfter === '3rd in the room'
+          ),
+        true,
+        60_000
+      )
+      phase('wait: terminal record')
+      // The browser declares the call dead on its own: the call ends
+      // visibly, in the dispatch of an event on the lost member's
+      // connection, whatever kind that event is (test-only 90s bound, not
+      // an app deadline)
+      await eventually(
+        async () =>
+          (await timeline()).some(
+            (entry) =>
+              entry.conn !== undefined &&
+              entry.conn === lostId &&
+              entry.errorAfter?.includes(
+                'A call connection failed. The call ended.'
+              )
+          ),
+        true,
+        90_000
+      )
+      phase('record: ordered assertions')
+      // Both notices, in the approved order, from the record
+      const entries = await timeline()
+      const waitingAt = entries.findIndex((entry) =>
+        entry.errorAfter?.includes('Waiting for its connection to recover')
+      )
+      const terminalAt = entries.findIndex(
+        (entry) =>
+          entry.conn === lostId &&
+          entry.errorAfter?.includes(
+            'A call connection failed. The call ended.'
+          )
+      )
+      assert.ok(waitingAt >= 0 && terminalAt > waitingAt)
+    } catch (error) {
+      // Evidence first, then the original failure
+      await dump()
+      throw error
+    }
+    phase('evidence: dump')
+    await dump()
+    phase('live: terminal state')
+    // The live page shows the terminal state, not only the record
+    assert.equal(
+      (await controls(a.page)).error,
+      'Call connection: A call connection failed. The call ended.'
+    )
+    await eventually(status(a.page), '2nd in the room')
+    assert.equal(
+      await a.page.evaluate(
+        (id) => window.outgoingConns.find((each) => each.peer === id)?.open,
+        c.peerId
+      ),
+      true
+    )
+  })
+})
+
+for (const reason of [
+  undefined,
+  'unknown',
+  'client namespace disconnect',
+  'ping timeout',
+  'transport close',
+  'transport error'
+]) {
+  void test(`room loss after call close with ${String(reason)} keeps the warning policy`, async () => {
+    const a = await openRoom('closed-call-loss', [
+      heldJoinAnswer,
+      recordRoomCalls
+    ])
+    const b = await openRoom('closed-call-loss')
+    const c = await openRoom('closed-call-loss')
+    await join(a)
+    await a.page.evaluate(() => {
+      window.releaseJoinAnswer()
+    })
+    await join(b)
+    await join(c)
+    await eventually(status(a.page), '3rd in the room')
+    await a.page.evaluate((id) => {
+      window.outgoingConns.find((call) => call.peer === id)?.close()
+    }, b.peerId)
+    await eventually(status(a.page), '2nd in the room')
+    await a.page.evaluate(
+      ({ peerId, reason }) => {
+        for (const listener of window.roomSocket.listeners('user-disconnected'))
+          listener(peerId, reason)
+      },
+      { peerId: b.peerId, reason }
+    )
+    const failure =
+      reason === 'ping timeout' ||
+      reason === 'transport close' ||
+      reason === 'transport error'
+    await eventually(
+      async () => (await controls(a.page)).error,
+      failure
+        ? "Call connection: A call ended because the other person's room connection was lost. No automatic redial is attempted."
+        : null
+    )
+    assert.equal(
+      await a.page.evaluate(
+        (id) => window.outgoingConns.find((call) => call.peer === id)?.open,
+        c.peerId
+      ),
+      true
+    )
+    // A duplicate announcement cannot create another warning after consumption.
+    if (!failure) {
+      await a.page.evaluate((id) => {
+        for (const listener of window.roomSocket.listeners('user-disconnected'))
+          listener(id, 'ping timeout')
+      }, b.peerId)
+      assert.equal((await controls(a.page)).error, null)
+    }
+  })
+}
+
+void test('local Leave retires a closed call before a later room-loss notice', async () => {
+  const a = await openRoom('closed-call-leave', [
+    heldJoinAnswer,
+    recordRoomCalls
+  ])
+  const b = await openRoom('closed-call-leave')
+  await join(a)
+  await a.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await join(b)
+  await eventually(status(a.page), '2nd in the room')
+  await a.page.evaluate(() => {
+    window.outgoingConns[0].close()
+  })
+  await eventually(status(a.page), '1st in the room')
+  await a.page.click('#call')
+  await a.page.evaluate((id) => {
+    for (const listener of window.roomSocket.listeners('user-disconnected'))
+      listener(id, 'ping timeout')
+  }, b.peerId)
+  assert.equal((await controls(a.page)).error, null)
+})
+
+for (const leave of ['local', 'remote']) {
+  void test(`retiring an interrupted call on ${leave} Leave clears only its waiting warning`, async () => {
+    const a = await openRoom('interrupted-retirement', recordRoomCalls)
+    const b = await openRoom('interrupted-retirement')
+    await join(a)
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+    await a.page.evaluate(() => {
+      navigator.mediaDevices.getUserMedia = () =>
+        Promise.reject(Error('unrelated camera failure'))
+    })
+    await a.page.click('#camera')
+    await eventually(
+      async () => (await controls(a.page)).error,
+      "Camera and microphone: Pinto can't reach your camera or microphone: unrelated camera failure"
+    )
+    await a.page.evaluate(() =>
+      window.outgoingConns[0].emit('iceStateChanged', 'disconnected')
+    )
+    await a.page.waitForFunction(() =>
+      document
+        .querySelector('#error')
+        ?.textContent.includes('Waiting for its connection')
+    )
+    await (leave === 'local' ? a : b).page.click('#call')
+    await eventually(
+      async () => (await controls(a.page)).error,
+      "Camera and microphone: Pinto can't reach your camera or microphone: unrelated camera failure"
+    )
+    const rejoining = leave === 'local' ? a : b
+    await join(rejoining)
+    await eventually(status(a.page), '2nd in the room')
+    await a.page.evaluate(() =>
+      window.outgoingConns[0].emit('iceStateChanged', 'connected')
+    )
+    assert.equal(
+      (await controls(a.page)).error,
+      "Camera and microphone: Pinto can't reach your camera or microphone: unrelated camera failure"
+    )
+  })
+}
+
+for (const reason of [
+  undefined,
+  'unrecognized reason',
+  'ping timeout',
+  'transport close',
+  'transport error'
+]) {
+  void test(`remote departure with ${String(reason)} has a bounded warning policy`, async () => {
+    const a = await openRoom('departure-policy', [
+      heldJoinAnswer,
+      recordRoomCalls
+    ])
+    const b = await openRoom('departure-policy')
+    await join(a)
+    await a.page.evaluate(() => {
+      window.releaseJoinAnswer()
+    })
+    await join(b)
+    await eventually(status(a.page), '2nd in the room')
+    // Established before the loss: media has flowed, the pending timer retired
+    await eventually(
+      () =>
+        a.page.evaluate(
+          (id) => window.outgoingStreams.some((each) => each.peer === id),
+          b.peerId
+        ),
+      true
+    )
+    await a.page.evaluate(
+      ({ peerId, reason }) => {
+        for (const listener of window.roomSocket.listeners('user-disconnected'))
+          listener(peerId, reason)
+      },
+      { peerId: b.peerId, reason }
+    )
+    const transportLoss =
+      reason === 'ping timeout' ||
+      reason === 'transport close' ||
+      reason === 'transport error'
+    await eventually(
+      async () => (await controls(a.page)).error,
+      transportLoss
+        ? 'Call connection: A call was interrupted. Waiting for its connection to recover.'
+        : null
+    )
+    // A kept call keeps its frozen tile; any other departure removes it
+    await eventually(
+      status(a.page),
+      transportLoss ? '2nd in the room' : '1st in the room'
+    )
+    // Temporary transport loss keeps the call; any other departure ends it
+    assert.equal(
+      await a.page.evaluate(
+        (id) => window.outgoingConns.find((conn) => conn.peer === id)?.open,
+        b.peerId
+      ),
+      transportLoss
+    )
+  })
+}
+
+void test('a call kept through transport loss survives rejoin without a second call', async () => {
+  const a = await openRoom('loss-keeps-call', [heldJoinAnswer, recordRoomCalls])
+  const b = await openRoom('loss-keeps-call')
+  await join(a)
+  await a.page.evaluate(() => {
+    window.releaseJoinAnswer()
+  })
+  await join(b)
+  await eventually(status(a.page), '2nd in the room')
+  await eventually(
+    () =>
+      a.page.evaluate(
+        (id) => window.outgoingStreams.some((each) => each.peer === id),
+        b.peerId
+      ),
+    true
+  )
+  await a.page.evaluate((id) => {
+    for (const listener of window.roomSocket.listeners('user-disconnected'))
+      listener(id, 'ping timeout')
+  }, b.peerId)
+  // A kept call keeps its frozen tile: membership display is unchanged
+  await eventually(status(a.page), '2nd in the room')
+  await eventually(
+    async () => (await controls(a.page)).error,
+    'Call connection: A call was interrupted. Waiting for its connection to recover.'
+  )
+  // The member rejoins: the surviving call is kept, no second call is placed
+  await a.page.evaluate((id) => {
+    for (const listener of window.roomSocket.listeners('user-connected'))
+      listener(id)
+  }, b.peerId)
+  await eventually(status(a.page), '2nd in the room')
+  await eventually(async () => (await controls(a.page)).error, null)
+  assert.deepEqual(
+    await a.page.evaluate(
+      (id) =>
+        window.outgoingConns
+          .filter((conn) => conn.peer === id)
+          .map((conn) => conn.open),
+      b.peerId
+    ),
+    [true]
+  )
+})
+
+/** Incoming calls are recorded but never answered: the offer arrives and the
+ * page ignores it, so the caller's attempt stays pending */
+function neverAnswerCalls() {
+  window.incomingCalls = []
+  let RealPeer: typeof Peer
+  Object.defineProperty(window, 'Peer', {
+    configurable: true,
+    get() {
+      return RealPeer
+    },
+    set(value: typeof Peer) {
+      RealPeer = value
+      type On = (
+        this: InstanceType<typeof Peer>,
+        event: string,
+        fn: (...args: unknown[]) => unknown
+      ) => unknown
+      const realOn = Reflect.get(value.prototype, 'on') as On
+      ;(value.prototype as { on: On }).on = function (
+        this: InstanceType<typeof Peer>,
+        event: string,
+        fn: (...args: unknown[]) => unknown
+      ) {
+        if (event !== 'call') return realOn.call(this, event, fn)
+        return realOn.call(this, event, ((
+          call: import('peerjs').MediaConnection
+        ) => {
+          window.incomingCalls.push(call.peer)
+        }) as (...args: unknown[]) => unknown)
+      }
+    }
+  })
+}
+
+void test('a call that never establishes ends visibly with exactly one fresh attempt', async () => {
+  const a = await openRoom('pending-timeout', [recordRoomCalls])
+  const b = await openRoom('pending-timeout', [neverAnswerCalls])
+  await join(a)
+  await join(b)
+  // No media ever flows, so the roster status is not the signal here: the
+  // placed call itself is
+  await eventually(
+    () =>
+      a.page.evaluate(
+        (id) => window.outgoingConns.filter((conn) => conn.peer === id).length,
+        b.peerId
+      ),
+    1
+  )
+  // The stuck attempt ends visibly, then exactly one fresh attempt is placed
+  await eventually(
+    async () => (await controls(a.page)).error,
+    'Call connection: A call could not be established in time. Trying once more.'
+  )
+  await eventually(
+    () =>
+      a.page.evaluate(
+        (id) => window.outgoingConns.filter((conn) => conn.peer === id).length,
+        b.peerId
+      ),
+    2
+  )
+  // The fresh attempt times out as well: visible end, and no third attempt
+  await eventually(
+    async () => (await controls(a.page)).error,
+    'Call connection: A call could not be established in time. The call ended.'
+  )
+  await sleep(2_500)
+  assert.equal(
+    await a.page.evaluate(
+      (id) => window.outgoingConns.filter((conn) => conn.peer === id).length,
+      b.peerId
+    ),
+    2
+  )
+  assert.equal(
+    await a.page.evaluate(
+      (id) =>
+        window.outgoingConns.some((conn) => conn.peer === id && conn.open),
+      b.peerId
+    ),
+    false
+  )
+})

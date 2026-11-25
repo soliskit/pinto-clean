@@ -1,0 +1,22 @@
+# Node.js Tools for Visual Studio
+.ntvs_analysis.dat
+node_modules/
+
+# Misc
+*.pem
+.DS_Store
+*.notes
+
+# Debug
+npm-debug.log*
+pids
+logs
+results
+
+# Visual Studio code coverage results
+*.coverage
+*.coveragexml
+# Local measurement output (raw reports stay private)
+.measurement/
+__pycache__/
+*.pyc

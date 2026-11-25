@@ -1,0 +1,229 @@
+import assert from 'node:assert/strict'
+import { afterEach, mock, test } from 'node:test'
+
+const PUBLIC_STUN = [{ urls: 'stun:stun.l.google.com:19302' }]
+const TOKEN_URL = 'https://api.twilio.com/2010-04-01/Accounts/AC123/Tokens.json'
+
+/** A Twilio token response, trimmed to the fields that matter */
+function twilioToken(ttl: string, host = 'global') {
+  return {
+    ttl,
+    ice_servers: [
+      {
+        url: `stun:${host}.stun.twilio.com:3478`,
+        urls: `stun:${host}.stun.twilio.com:3478`
+      },
+      {
+        url: `turn:${host}.turn.twilio.com:3478?transport=udp`,
+        urls: `turn:${host}.turn.twilio.com:3478?transport=udp`,
+        username: 'user',
+        credential: 'secret'
+      }
+    ]
+  }
+}
+
+let loads = 0
+
+/**
+ * Imports a fresh copy of the module, which reads the Twilio credentials and
+ * starts with an empty cache when it loads.
+ */
+async function load(sid?: string, token?: string) {
+  setEnv('TWILIO_ACCOUNT_SID', sid)
+  setEnv('TWILIO_AUTH_TOKEN', token)
+  const url = new URL(
+    `../src/ice-servers.ts?load=${String(++loads)}`,
+    import.meta.url
+  )
+  const module = (await import(
+    url.href
+  )) as typeof import('../src/ice-servers.ts')
+  return module.getIceServers
+}
+
+function setEnv(name: string, value: string | undefined) {
+  if (value === undefined) Reflect.deleteProperty(process.env, name)
+  else process.env[name] = value
+}
+
+/** What the browser receives, since /config sends the servers as JSON */
+function asJson(value: unknown) {
+  return JSON.parse(JSON.stringify(value)) as unknown
+}
+
+afterEach(() => {
+  mock.restoreAll()
+  mock.timers.reset()
+  setEnv('TWILIO_ACCOUNT_SID', undefined)
+  setEnv('TWILIO_AUTH_TOKEN', undefined)
+})
+
+void test('without Twilio credentials, returns a public STUN server', async () => {
+  const fetch = mock.method(globalThis, 'fetch')
+  const getIceServers = await load()
+
+  assert.deepEqual(await getIceServers(), PUBLIC_STUN)
+  assert.equal(fetch.mock.callCount(), 0)
+})
+
+void test('needs both the Twilio account SID and auth token', async () => {
+  const fetch = mock.method(globalThis, 'fetch')
+
+  assert.deepEqual(await (await load('AC123'))(), PUBLIC_STUN)
+  assert.deepEqual(await (await load(undefined, 'token'))(), PUBLIC_STUN)
+  assert.equal(fetch.mock.callCount(), 0)
+})
+
+void test('asks Twilio for a token and returns its STUN and TURN servers', async () => {
+  const fetch = mock.method(
+    globalThis,
+    'fetch',
+    () =>
+      new Promise<Response>((resolve) => {
+        resolve(Response.json(twilioToken('86400')))
+      })
+  )
+  const getIceServers = await load('AC123', 'token')
+
+  assert.deepEqual(asJson(await getIceServers()), [
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    {
+      urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+      username: 'user',
+      credential: 'secret'
+    }
+  ])
+  assert.equal(fetch.mock.callCount(), 1)
+  const [url, init] = fetch.mock.calls[0].arguments
+  assert.equal(url, TOKEN_URL)
+  assert.ok(init, 'fetch received init')
+  assert.equal(init.method, 'POST')
+  assert.deepEqual(init.headers, {
+    Authorization: `Basic ${Buffer.from('AC123:token').toString('base64')}`
+  })
+})
+
+void test('reuses the servers for half of their lifetime', async () => {
+  let mono = 0
+  mock.method(performance, 'now', () => mono)
+  const tokens = [twilioToken('100', 'first'), twilioToken('100', 'second')]
+  const fetch = mock.method(
+    globalThis,
+    'fetch',
+    () =>
+      new Promise<Response>((resolve) => {
+        resolve(Response.json(tokens[fetch.mock.callCount()]))
+      })
+  )
+  const getIceServers = await load('AC123', 'token')
+
+  const first = await getIceServers()
+  assert.equal(first[0].urls, 'stun:first.stun.twilio.com:3478')
+
+  mono = 49_999
+  assert.equal(await getIceServers(), first)
+  assert.equal(fetch.mock.callCount(), 1)
+
+  mono = 50_000
+  const second = await getIceServers()
+  assert.equal(second[0].urls, 'stun:second.stun.twilio.com:3478')
+  assert.equal(fetch.mock.callCount(), 2)
+})
+
+void test('wall-clock steps never change when credentials refresh', async () => {
+  let mono = 0
+  let wall = 0
+  mock.method(performance, 'now', () => mono)
+  mock.method(Date, 'now', () => wall)
+  const tokens = [twilioToken('100', 'first'), twilioToken('100', 'second')]
+  const fetch = mock.method(
+    globalThis,
+    'fetch',
+    () =>
+      new Promise<Response>((resolve) => {
+        resolve(Response.json(tokens[fetch.mock.callCount()]))
+      })
+  )
+  const getIceServers = await load('AC123', 'token')
+
+  const first = await getIceServers()
+  assert.equal(first[0].urls, 'stun:first.stun.twilio.com:3478')
+
+  // A backward wall step must not extend credentials past their deadline
+  wall = -1_000_000
+  mono = 49_999
+  assert.equal(await getIceServers(), first)
+  assert.equal(fetch.mock.callCount(), 1)
+  mono = 50_000
+  const second = await getIceServers()
+  assert.equal(second[0].urls, 'stun:second.stun.twilio.com:3478')
+  assert.equal(fetch.mock.callCount(), 2)
+
+  // A forward wall step must not discard a still-valid cache either
+  wall = 10_000_000
+  mono = 99_999
+  assert.equal(await getIceServers(), second)
+  assert.equal(fetch.mock.callCount(), 2)
+})
+
+void test('falls back to STUN when Twilio answers with an error', async () => {
+  const error = mock.method(console, 'error', () => {})
+  const fetch = mock.method(
+    globalThis,
+    'fetch',
+    () =>
+      new Promise<Response>((resolve) => {
+        resolve(Response.json({ message: 'Authenticate' }, { status: 401 }))
+      })
+  )
+  const getIceServers = await load('AC123', 'wrong')
+
+  assert.deepEqual(await getIceServers(), PUBLIC_STUN)
+  const [message, cause] = error.mock.calls[0].arguments
+  assert.equal(message, 'Could not get ICE servers from Twilio')
+  assert.equal((cause as Error).message, 'Twilio responded with 401')
+
+  // Failures are not cached, so the next call asks Twilio again
+  await getIceServers()
+  assert.equal(fetch.mock.callCount(), 2)
+})
+
+void test('falls back to STUN when Twilio cannot be reached', async () => {
+  const error = mock.method(console, 'error', () => {})
+  mock.method(globalThis, 'fetch', () =>
+    Promise.reject(new TypeError('fetch failed'))
+  )
+  const getIceServers = await load('AC123', 'token')
+
+  assert.deepEqual(await getIceServers(), PUBLIC_STUN)
+  assert.equal(error.mock.callCount(), 1)
+})
+
+void test(
+  'a Twilio fetch that never answers falls back to STUN',
+  // A reverted or missing abort must fail finitely here, not hang the suite
+  { timeout: 15_000 },
+  async () => {
+    const error = mock.method(console, 'error', () => {})
+    mock.method(
+      globalThis,
+      'fetch',
+      (_url: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(init.signal?.reason as Error)
+          })
+        })
+    )
+    const getIceServers = await load('AC123', 'token')
+
+    // Real 5-second wait: AbortSignal.timeout uses its own timer, which the
+    // mock timers do not fast-forward
+    const started = performance.now()
+    assert.deepEqual(await getIceServers(), PUBLIC_STUN)
+    assert.equal(error.mock.callCount(), 1)
+    // The promised bound is 5s: it must not fall back much earlier either
+    assert.ok(performance.now() - started >= 4_000)
+  }
+)

@@ -1,0 +1,53 @@
+{
+  "name": "pinto",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": "26.13.0"
+  },
+  "scripts": {
+    "start": "node src/index.ts",
+    "dev": "node --watch src/index.ts",
+    "test": "node --test --test-timeout=120000 test/*.test.ts",
+    "typecheck": "tsc && tsc -p tsconfig.client.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test:slow": "node --test --test-timeout=120000 test/slow/*.test.ts"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "peer": "^1.0.2",
+    "peerjs": "^1.5.5",
+    "socket.io": "^4.8.4",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.1",
+    "eslint": "^10.13.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.7",
+    "eslint-plugin-promise": "^7.3.0",
+    "globals": "^17.12.0",
+    "istanbul-lib-coverage": "^3.2.2",
+    "playwright": "^1.64.1",
+    "prettier": "^3.9.10",
+    "socket.io-client": "^4.8.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "v8-to-istanbul": "^9.3.0"
+  },
+  "author": "David Solis",
+  "repository": "https://github.com/soliskit/pinto",
+  "description": "Pinto is a browser-based video calling app built with WebRTC. Share a room link, talk with friends, and switch between camera video and a photo.",
+  "keywords": [
+    "WebRTC",
+    "PeerJS",
+    "Socket.io",
+    "Video Conferencing"
+  ],
+  "license": "MIT",
+  "private": true
+}

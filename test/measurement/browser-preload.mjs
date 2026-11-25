@@ -1,0 +1,287 @@
+// Measurement-only preload. Loaded by the measurement runner through
+// NODE_OPTIONS; it does nothing unless PINTO_MEASURE is set. While active it
+// wraps Chromium launches so every page records V8 JavaScript coverage.
+//
+// Playwright's own coverage API loses a document's coverage once the page
+// navigates away, so this preload drives the CDP Profiler directly:
+// - a capture is taken before every navigation-capable page API call
+//   (goto, reload, goBack, goForward, click, dblclick, tap, press), which is
+//   how the suites drive pages;
+// - a poll captures every 250ms as a backstop for navigation the page's own
+//   script starts;
+// - a final capture is taken before the page, context or browser closes.
+// Each take resets V8's counters, so captures never double-count. Every
+// navigation and every capture is logged; the runner fails the measurement
+// when a navigation has no capture before it, so missing data fails the run
+// instead of printing a valid-looking number.
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { chromium } from 'playwright'
+
+if (process.env.PINTO_MEASURE === '1') {
+  const dir = process.env.PINTO_MEASURE_DIR
+  if (!dir) throw new Error('PINTO_MEASURE=1 requires PINTO_MEASURE_DIR')
+  const captureDir = join(dir, 'browser')
+  mkdirSync(captureDir, { recursive: true })
+  const indexFile = join(captureDir, 'captures.index')
+  const POLL_MS = 250
+  // Off by default so the canonical measurement is unchanged. With
+  // PINTO_MEASURE_AFTER_ACTION=1 a capture is also taken right after each
+  // action API (click, dblclick, tap, press) returns.
+  const AFTER_ACTION = process.env.PINTO_MEASURE_AFTER_ACTION === '1'
+  const ACTION_APIS = new Set(['click', 'dblclick', 'tap', 'press'])
+  /** @type {Array<'goto' | 'reload' | 'goBack' | 'goForward' | 'click' | 'dblclick' | 'tap' | 'press'>} */
+  const NAV_APIS = [
+    'goto',
+    'reload',
+    'goBack',
+    'goForward',
+    'click',
+    'dblclick',
+    'tap',
+    'press'
+  ]
+  let seq = 0
+
+  /** @param {import('playwright').Page} page @param {import('playwright').BrowserContext} context */
+  async function instrument(page, context) {
+    const session = await context.newCDPSession(page)
+    await session.send('Page.enable')
+    await session.send('Debugger.enable')
+    await session.send('Profiler.enable')
+    await session.send('Profiler.startPreciseCoverage', {
+      callCount: true,
+      detailed: true
+    })
+
+    /** @type {Map<string, string>} */
+    const sources = new Map()
+    session.on('Debugger.scriptParsed', (event) => {
+      if (event.url) sources.set(event.scriptId, event.url)
+    })
+    /** @type {{at: number, url: string}[]} */
+    const navLog = []
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame())
+        navLog.push({ at: Date.now(), url: page.url() })
+    })
+
+    /** @param {string} scriptId */
+    async function sourceFor(scriptId) {
+      try {
+        const r = await session.send('Debugger.getScriptSource', { scriptId })
+        return r.scriptSource
+      } catch {
+        return undefined
+      }
+    }
+
+    /** @param {string} why */
+    async function take(why) {
+      const at = Date.now()
+      seq += 1
+      const name = `${String(process.pid)}-${String(seq)}.json`
+      let result
+      try {
+        ;({ result } = await session.send('Profiler.takePreciseCoverage'))
+      } catch (error) {
+        // A poll or close-flush can race a target that is already gone; that
+        // is not missing data. Anything else is a failed capture and fails
+        // the run. A crashed test process fails the suite itself, so a
+        // capture indexed only after success can never look valid.
+        if (/closed/i.test(String(error))) return
+        writeFileSync(
+          join(captureDir, `${name}.failed`),
+          `takePreciseCoverage threw during ${why}: ${String(error)}\n`
+        )
+        return
+      }
+      appendFileSync(indexFile, `${name}\t${why}\n`)
+      const entries = []
+      for (const entry of result) {
+        if (!entry.url) continue
+        entries.push({
+          url: entry.url,
+          source: await sourceFor(entry.scriptId),
+          functions: entry.functions
+        })
+      }
+      writeFileSync(
+        join(captureDir, name),
+        JSON.stringify({
+          pid: process.pid,
+          why,
+          at,
+          navigations: navLog.slice(),
+          entries
+        })
+      )
+    }
+
+    const poll = setInterval(() => {
+      if (!page.isClosed()) take('poll').catch(() => {})
+    }, POLL_MS)
+    poll.unref()
+
+    /**
+     * Settle an action API call, take the after-capture without replacing
+     * the action's own result or error, then rethrow or return it.
+     * @template T
+     * @param {string} api
+     * @param {Promise<T>} action
+     * @returns {Promise<T>}
+     */
+    const settleAction = async (api, action) => {
+      const settled = await action.then(
+        (value) => ({ value }),
+        /** @param {unknown} error */
+        (error) => ({ error })
+      )
+      if (!page.isClosed()) {
+        try {
+          await take(`after:${api}`)
+        } catch (error) {
+          // Never replace the action's own result or error; record the
+          // failed capture the same way take() does so the run fails.
+          seq += 1
+          writeFileSync(
+            join(
+              captureDir,
+              `${String(process.pid)}-${String(seq)}.json.failed`
+            ),
+            `after:${api} capture threw: ${String(error)}\n`
+          )
+        }
+      }
+      if ('error' in settled) throw settled.error
+      return settled.value
+    }
+    /**
+     * Wrap one navigation-capable page API so a capture is taken before it
+     * (and after it, when PINTO_MEASURE_AFTER_ACTION=1 and it is an action).
+     * @template {unknown[]} A
+     * @template T
+     * @param {'goto' | 'reload' | 'goBack' | 'goForward' | 'click' | 'dblclick' | 'tap' | 'press'} api
+     * @param {(...args: A) => Promise<T>} original
+     * @returns {(...args: A) => Promise<T>}
+     */
+    const wrapNav = (api, original) => {
+      return async (...args) => {
+        await take(`before:${api}`)
+        if (!AFTER_ACTION || !ACTION_APIS.has(api)) return original(...args)
+        return settleAction(api, original(...args))
+      }
+    }
+    for (const api of NAV_APIS) {
+      switch (api) {
+        case 'goto':
+          page.goto = wrapNav(api, page.goto.bind(page))
+          break
+        case 'reload':
+          page.reload = wrapNav(api, page.reload.bind(page))
+          break
+        case 'goBack':
+          page.goBack = wrapNav(api, page.goBack.bind(page))
+          break
+        case 'goForward':
+          page.goForward = wrapNav(api, page.goForward.bind(page))
+          break
+        case 'click':
+          page.click = wrapNav(api, page.click.bind(page))
+          break
+        case 'dblclick':
+          page.dblclick = wrapNav(api, page.dblclick.bind(page))
+          break
+        case 'tap':
+          page.tap = wrapNav(api, page.tap.bind(page))
+          break
+        case 'press':
+          page.press = wrapNav(api, page.press.bind(page))
+          break
+      }
+    }
+
+    const originalClose = page.close.bind(page)
+    page.close = async (...args) => {
+      clearInterval(poll)
+      // A page from browser.newPage owns its context: its close closes the
+      // context, which loops back here. Guard so the flush happens once.
+      if (!closing.has(page)) {
+        closing.add(page)
+        await take('page.close')
+      }
+      return originalClose(...args)
+    }
+    page.once('close', () => {
+      clearInterval(poll)
+    })
+    return { take }
+  }
+
+  /** @type {WeakSet<import('playwright').Page>} */
+  const instrumented = new WeakSet()
+  /** @type {WeakSet<import('playwright').Page>} */
+  const closing = new WeakSet()
+  /** @type {WeakMap<import('playwright').Page, {take: (why: string) => Promise<void>}>} */
+  const takesByPage = new WeakMap()
+
+  /** @param {import('playwright').BrowserContext} context */
+  function watchContext(context) {
+    const originalNewPage = context.newPage.bind(context)
+    context.newPage = async (...args) => {
+      const page = await originalNewPage(...args)
+      if (!instrumented.has(page)) {
+        instrumented.add(page)
+        takesByPage.set(page, await instrument(page, context))
+      }
+      return page
+    }
+    const originalClose = context.close.bind(context)
+    context.close = async (...args) => {
+      // Flush coverage directly; never call page.close here, because a page
+      // that owns its context would loop back into this close.
+      for (const page of context.pages()) {
+        const handle = takesByPage.get(page)
+        if (handle && !closing.has(page) && !page.isClosed()) {
+          closing.add(page)
+          try {
+            await handle.take('context.close')
+          } catch {
+            // The page is already closing; a missed capture here is expected.
+          }
+        }
+      }
+      return originalClose(...args)
+    }
+  }
+
+  const originalLaunch = chromium.launch.bind(chromium)
+  chromium.launch = async (...args) => {
+    const browser = await originalLaunch(...args)
+    // Covers context.newPage, and contexts the browser creates implicitly.
+    browser.on('context', watchContext)
+    for (const context of browser.contexts()) watchContext(context)
+    const originalBrowserNewPage = browser.newPage.bind(browser)
+    browser.newPage = async (...pageArgs) => {
+      const page = await originalBrowserNewPage(...pageArgs)
+      if (!instrumented.has(page)) {
+        instrumented.add(page)
+        watchContext(page.context())
+        takesByPage.set(page, await instrument(page, page.context()))
+      }
+      return page
+    }
+    const originalClose = browser.close.bind(browser)
+    browser.close = async (...closeArgs) => {
+      for (const context of browser.contexts()) {
+        try {
+          await context.close()
+        } catch {
+          // The context is already closing; ignore and keep closing the rest.
+        }
+      }
+      return originalClose(...closeArgs)
+    }
+    return browser
+  }
+}

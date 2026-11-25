@@ -1,0 +1,65 @@
+# Pinto Evidence Record
+
+The evidence this project relies on: checks of the project's own behavior, and outside facts from providers and standards. Each entry has its source, the date checked, a status, and its limits. A local result never closes a real-platform check, and only Verified facts support a requirement.
+
+Statuses:
+
+- Verified - established against its source on the recorded date. For a fact, the source was read. For a check, a result was recorded at a named commit on the stated platform.
+- Unproven - evidence exists but does not establish the claim (conflicting, stale, or unreadable sources). An Unproven entry cannot support a requirement.
+- Pending - no closing result yet. Where a local or partial result exists, the entry states the local result and the real-platform result separately.
+
+Entries keep their original check dates; nothing was rechecked or rerun for this reformat.
+
+## Checks
+
+Every service check below is recorded as Pending. The later capture and call-access fixes in PRs #88 and #89 have local and CI results; those results do not close the planned service checks or establish physical capture indicators and real-device calls. The [existing-app audit](audit/audit-report.md) is a separate result: no review verdict covers this exact version of the planned checks, and the audit does not close or certify them. Real-device behavior is still unproven. The private Playbook holds the Check and Fail text for B1 to B16 under How It Works, and the full private pass rule for each unproven check under Private proof definitions in the Charter. [The Pinto Project](https://github.com/users/soliskit/projects/7) owns work order and current status.
+
+The earlier app audit (kept in git history) left these checks open: physical camera and microphone indicators on any device; what happens when replaceTrack fails; revoking camera permission in the middle of a call (the page has no handler for a track ending); locking a phone and returning, switching apps, and navigating away on a phone; direct versus relayed calls across separate networks, and whether Twilio relay is configured; wake-up time after the free host sleeps; behavior in Safari, Firefox, and on phones; whether the deployed server code matches the audited commit; server memory, speed, and stability under repeated joins; stale tiles after a replaced call, and PeerJS behavior after a call error. Until these run, no record claims the app works every time. Room-lifecycle and reconnection paths beyond the merged repairs also remain open.
+
+- **B1 Audit first.** Pending.
+- **B2 Zero cost.** Pending.
+- **B3 Privileged pages stay off Pages.** Pending.
+- **B4 Headers.** Pending.
+- **B5 Link authority.** Pending.
+- **B6 End revokes every token.** Pending.
+- **B7 Recovery fails closed.** Pending.
+- **B8 Host sign-in.** Pending.
+- **B9 Diagnostics.** Pending.
+- **B10 Quota messages.** Pending.
+- **B11 Release rules.** Pending.
+- **B12 Camera and microphone teardown.** Pending.
+- **B13 Device matrix.** Pending.
+- **B14 Clean public repo.** Pending.
+- **B15 Two-person limit.** Pending.
+- **B16 Direct-call admission.** Pending.
+
+### Unproven checks
+
+Each is Pending. Items 1 to 8 have their full private pass definitions under Private proof definitions in the Playbook Charter. [The Pinto Project](https://github.com/users/soliskit/projects/7) owns work order and current status. This list is an evidence index, not a second plan.
+
+1. TURN accounting
+2. WebSocket request counting
+3. Never-joined token revocation
+4. Recovery on the free plan
+5. CPU budget and porting effort
+6. Mail deliverability and quota abuse
+7. Pages terms fit, a judgment and not a test
+8. Physical capture shutdown
+
+### Later phases
+
+Each phase after the audit needs its own authorization and its own evidence. Local results never count as proof of provider or platform behavior.
+
+## Facts
+
+Each outside fact carries its source, the date checked, and a status of Verified or Unproven. Only Verified facts support a requirement. E2 stays Unproven. Keep each fact's date and limits when using it.
+
+- **E1 Pages limits and terms.** Verified October 21, 2026. On GitHub Free, Pages requires a public repo. Published sites are limited to 1 GB, with a soft 100 GB a month, and a soft 10 builds an hour (not applied to custom Actions workflows). The terms say Pages must not run a business, e-commerce, or commercial software as a service, and should not carry sensitive transactions such as passwords or credit card numbers. No legal judgment is made. Sources: [limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits), [creating a site](https://docs.github.com/en/pages/getting-started-with-github-pages/creating-a-github-pages-site).
+- **E2 Pages headers observed.** Unproven. Date checked: not recorded. No source, date, or response is recorded for the earlier sample of missing frame, content security, and HSTS headers. It is not a platform claim. A fresh dated sample is recorded as E9.
+- **E3 Worker static-file headers.** Verified October 21, 2026. The `_headers` file applies to static asset responses only. Custom headers defined in `_headers` are not applied to responses generated by Worker code, even when the request URL matches a rule; those responses send their own headers. Source: [Cloudflare headers](https://developers.cloudflare.com/workers/static-assets/headers/).
+- **E4 Render free plan.** Verified October 21, 2026. A free web service spins down after 15 minutes without inbound traffic, including HTTP requests and WebSocket messages, and spinning back up on the next request takes about one minute. Source: [Render free plan](https://render.com/docs/free).
+- **E5 Cloudflare free plan.** Verified October 21, 2026. Request caps only: Workers allow 100,000 requests a day, and Durable Objects allow 100,000 requests a day, both resetting at 00:00 UTC. CPU and duration limits are on the linked limits page. Sources: [Workers limits](https://developers.cloudflare.com/workers/platform/limits/), [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/).
+- **E6 LiveKit free plan.** Verified October 21, 2026. Monthly allowances on the free Build plan: 5,000 WebRTC participant minutes and 50 GB of downstream data transfer. On the free Build plan the included allowance is a hard cap: after it is exceeded, new requests fail rather than incurring charges. Allowances reset on the first day of each calendar month and are shared across all of a user's free projects. Source: [LiveKit quotas](https://docs.livekit.io/home/cloud/quotas-and-limits/).
+- **E7 Resend free plan.** Verified October 21, 2026. 100 emails a day, with 30-day data retention. Source: [Resend pricing](https://resend.com/pricing).
+- **E8 Earlier source observations.** Unproven. Read at commit c8c0010, not tested. Camera and microphone are requested on page load. Camera off swaps the sent video track: a canvas photo track replaces the camera track on every sender. Mute disables the audio track. End reconnects the socket. No step that stops the tracks was found. The server accepts any non-empty room name and id. These claims describe only the pinned commit. Source: repository at main `c8c0010`, read October 21, 2026.
+- **E9 Pages headers sample.** Verified October 21, 2026. A HEAD request returned server GitHub.com and access-control-allow-origin *, and no X-Frame-Options, Content-Security-Policy, or Strict-Transport-Security. One sample is not proof for every response. Source: HEAD request to https://soliskit.github.io/ on October 21, 2026.

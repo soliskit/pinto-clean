@@ -1,0 +1,68 @@
+name: Slow tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '20 7 * * 6'
+      timezone: 'America/Los_Angeles'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch replaces a run still in progress.
+# Scheduled and manual runs use a separate group so they never cancel
+# or replace push or pull request runs, queued or running
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '-weekly' || '' }}
+  cancel-in-progress: true
+
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tests: ${{ steps.counts.outputs.tests }}
+      skipped: ${{ steps.counts.outputs.skipped }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      - run: sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+      - run: npx playwright install --with-deps chromium
+      - name: Run the slow tests
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:slow 2>&1 | tee slow-output.txt
+      - name: Count the slow tests
+        id: counts
+        if: always()
+        shell: bash
+        run: |
+          count() { grep -E "^(#|ℹ) $1 [0-9]+" slow-output.txt | tail -n 1 | grep -oE '[0-9]+$' || true; }
+          echo "tests=$(count tests)" >> "$GITHUB_OUTPUT"
+          echo "skipped=$(count skipped)" >> "$GITHUB_OUTPUT"
+
+  # Passes only when "slow" succeeded and ran at least one test with none
+  # skipped. A skipped, cancelled, timed out or failed job fails this check.
+  result:
+    name: Slow tests result
+    needs: slow
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SLOW_RESULT: ${{ needs.slow.result }}
+          SLOW_TESTS: ${{ needs.slow.outputs.tests }}
+          SLOW_SKIPPED: ${{ needs.slow.outputs.skipped }}
+        run: |
+          echo "slow: result=$SLOW_RESULT tests=${SLOW_TESTS:-none} skipped=${SLOW_SKIPPED:-none}"
+          [ "$SLOW_RESULT" = success ] || exit 1
+          [ "${SLOW_TESTS:-0}" -ge 1 ] || exit 1
+          [ "${SLOW_SKIPPED:-0}" -eq 0 ] || exit 1

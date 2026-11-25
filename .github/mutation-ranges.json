@@ -1,0 +1,1443 @@
+{
+  "comment": "Single source for the mutation matrix: the plan job emits this include list, and the guard validates every ranged target by direct enumeration (each whole file's mutants covered exactly once across its shards). Ranges are 1-based inclusive lines; a shard without a mutators list runs every mutator in its range, and shards sharing a range split it by mutator family, so every shard stays within the per-job time cap.",
+  "include": [
+    {
+      "shard": "ice-servers",
+      "target": "ice-servers",
+      "mutate": "src/ice-servers.ts",
+      "tests": "test/ice-servers.test.ts",
+      "timeout": 30
+    },
+    {
+      "shard": "escape-log-id",
+      "target": "escape-log-id",
+      "mutate": "src/escape-log-id.ts",
+      "tests": "test/escape-log-id.test.ts",
+      "timeout": 30
+    },
+    {
+      "shard": "salutant-adapter",
+      "target": "salutant-adapter",
+      "mutate": "src/auth/salutant-adapter.ts",
+      "tests": "test/auth-salutant-adapter.test.ts",
+      "timeout": 45
+    },
+    {
+      "shard": "ordinal",
+      "target": "ordinal",
+      "mutate": "public/ordinal.js",
+      "tests": "test/ordinal.test.ts",
+      "timeout": 30
+    },
+    {
+      "shard": "element",
+      "target": "element",
+      "mutate": "public/element.js",
+      "tests": "test/element.test.ts",
+      "browser": "chromium",
+      "timeout": 30
+    },
+    {
+      "shard": "home",
+      "target": "home",
+      "mutate": "public/home.js",
+      "tests": "test/home.test.ts test/contrast.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-1-39",
+      "target": "index",
+      "mutate": "src/index.ts:1-39",
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-40-49",
+      "target": "index",
+      "mutate": "src/index.ts:40-49",
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-50-88",
+      "target": "index",
+      "mutate": "src/index.ts:50-94",
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-89-117",
+      "target": "index",
+      "mutate": "src/index.ts:95-123",
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-118-158",
+      "target": "index",
+      "mutate": "src/index.ts:124-164",
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-a",
+      "target": "index",
+      "mutate": "src/index.ts:165-234",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-b",
+      "target": "index",
+      "mutate": "src/index.ts:165-234",
+      "mutators": [
+        "EqualityOperator",
+        "BooleanLiteral",
+        "ArrayDeclaration"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-c",
+      "target": "index",
+      "mutate": "src/index.ts:165-234",
+      "mutators": [
+        "CallExpression",
+        "OptionalChaining",
+        "ArrowFunction"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-d",
+      "target": "index",
+      "mutate": "src/index.ts:165-234",
+      "mutators": [
+        "LogicalOperator",
+        "MethodExpression"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-e",
+      "target": "index",
+      "mutate": "src/index.ts:165-176",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-f",
+      "target": "index",
+      "mutate": "src/index.ts:177-234",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-g",
+      "target": "index",
+      "mutate": "src/index.ts:165-190",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-159-228-h",
+      "target": "index",
+      "mutate": "src/index.ts:191-234",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-229-241",
+      "target": "index",
+      "mutate": "src/index.ts:235-247",
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "index-242-272",
+      "target": "index",
+      "mutate": "src/index.ts:248-278",
+      "tests": "test/server.test.ts test/default-ports.test.ts test/port-validation.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1-107-a",
+      "target": "room",
+      "mutate": "public/room.js:1-28",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1-107-b",
+      "target": "room",
+      "mutate": "public/room.js:29-110",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1-107-c",
+      "target": "room",
+      "mutate": "public/room.js:1-110",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1-107-d",
+      "target": "room",
+      "mutate": "public/room.js:1-110",
+      "mutators": [
+        "BooleanLiteral",
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1-107-e",
+      "target": "room",
+      "mutate": "public/room.js:1-110",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1-107-f",
+      "target": "room",
+      "mutate": "public/room.js:1-110",
+      "mutators": [
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-108-266-a",
+      "target": "room",
+      "mutate": "public/room.js:111-296",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-108-266-b",
+      "target": "room",
+      "mutate": "public/room.js:111-296",
+      "mutators": [
+        "ConditionalExpression",
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-108-266-c",
+      "target": "room",
+      "mutate": "public/room.js:111-296",
+      "mutators": [
+        "CallExpression",
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-108-266-d",
+      "target": "room",
+      "mutate": "public/room.js:111-296",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator",
+        "OptionalChaining",
+        "ObjectLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-108-266-e",
+      "target": "room",
+      "mutate": "public/room.js:111-296",
+      "mutators": [
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-267-377-a",
+      "target": "room",
+      "mutate": "public/room.js:297-407",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-267-377-b",
+      "target": "room",
+      "mutate": "public/room.js:297-407",
+      "mutators": [
+        "ConditionalExpression",
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-267-377-c",
+      "target": "room",
+      "mutate": "public/room.js:297-407",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-267-377-d",
+      "target": "room",
+      "mutate": "public/room.js:297-390",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-267-377-e",
+      "target": "room",
+      "mutate": "public/room.js:391-407",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-267-377-f",
+      "target": "room",
+      "mutate": "public/room.js:297-407",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-378-470-a",
+      "target": "room",
+      "mutate": "public/room.js:408-500",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-378-470-b",
+      "target": "room",
+      "mutate": "public/room.js:408-469",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-378-470-c",
+      "target": "room",
+      "mutate": "public/room.js:470-500",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-378-470-d",
+      "target": "room",
+      "mutate": "public/room.js:408-500",
+      "mutators": [
+        "BooleanLiteral",
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-378-470-e",
+      "target": "room",
+      "mutate": "public/room.js:408-500",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-378-470-f",
+      "target": "room",
+      "mutate": "public/room.js:408-500",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-378-470-g",
+      "target": "room",
+      "mutate": "public/room.js:408-500",
+      "mutators": [
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-471-526-a",
+      "target": "room",
+      "mutate": "public/room.js:501-556",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-471-526-b",
+      "target": "room",
+      "mutate": "public/room.js:501-537",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-471-526-c",
+      "target": "room",
+      "mutate": "public/room.js:538-556",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-471-526-d",
+      "target": "room",
+      "mutate": "public/room.js:501-556",
+      "mutators": [
+        "BooleanLiteral",
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-471-526-e",
+      "target": "room",
+      "mutate": "public/room.js:501-556",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-471-526-f",
+      "target": "room",
+      "mutate": "public/room.js:501-556",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-471-526-g",
+      "target": "room",
+      "mutate": "public/room.js:501-556",
+      "mutators": [
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-a",
+      "target": "room",
+      "mutate": "public/room.js:557-705",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-b",
+      "target": "room",
+      "mutate": "public/room.js:557-631",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-c",
+      "target": "room",
+      "mutate": "public/room.js:632-659",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-d",
+      "target": "room",
+      "mutate": "public/room.js:660-705",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-e",
+      "target": "room",
+      "mutate": "public/room.js:557-705",
+      "mutators": [
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-f",
+      "target": "room",
+      "mutate": "public/room.js:557-705",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-g",
+      "target": "room",
+      "mutate": "public/room.js:557-705",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-h",
+      "target": "room",
+      "mutate": "public/room.js:557-705",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-527-675-i",
+      "target": "room",
+      "mutate": "public/room.js:557-705",
+      "mutators": [
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-676-770-a",
+      "target": "room",
+      "mutate": "public/room.js:706-800",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-676-770-b",
+      "target": "room",
+      "mutate": "public/room.js:706-800",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-676-770-c",
+      "target": "room",
+      "mutate": "public/room.js:706-800",
+      "mutators": [
+        "BooleanLiteral",
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-676-770-d",
+      "target": "room",
+      "mutate": "public/room.js:706-800",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-676-770-e",
+      "target": "room",
+      "mutate": "public/room.js:706-800",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator",
+        "OptionalChaining",
+        "ObjectLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-676-770-f",
+      "target": "room",
+      "mutate": "public/room.js:706-800",
+      "mutators": [
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-a",
+      "target": "room",
+      "mutate": "public/room.js:801-922",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-b",
+      "target": "room",
+      "mutate": "public/room.js:801-883",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-c",
+      "target": "room",
+      "mutate": "public/room.js:884-922",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-d",
+      "target": "room",
+      "mutate": "public/room.js:801-922",
+      "mutators": [
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-e",
+      "target": "room",
+      "mutate": "public/room.js:801-922",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-f",
+      "target": "room",
+      "mutate": "public/room.js:801-922",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-g",
+      "target": "room",
+      "mutate": "public/room.js:801-922",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-h",
+      "target": "room",
+      "mutate": "public/room.js:801-922",
+      "mutators": [
+        "OptionalChaining",
+        "ObjectLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-771-876-i",
+      "target": "room",
+      "mutate": "public/room.js:801-922",
+      "mutators": [
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-a",
+      "target": "room",
+      "mutate": "public/room.js:923-998",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-b",
+      "target": "room",
+      "mutate": "public/room.js:923-998",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-c",
+      "target": "room",
+      "mutate": "public/room.js:923-998",
+      "mutators": [
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-d",
+      "target": "room",
+      "mutate": "public/room.js:923-998",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-e",
+      "target": "room",
+      "mutate": "public/room.js:923-998",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-877-929-f",
+      "target": "room",
+      "mutate": "public/room.js:923-998",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator",
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-a",
+      "target": "room",
+      "mutate": "public/room.js:999-1062",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-b",
+      "target": "room",
+      "mutate": "public/room.js:1063-1081",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-c",
+      "target": "room",
+      "mutate": "public/room.js:1082-1083",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-d",
+      "target": "room",
+      "mutate": "public/room.js:999-1079",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-e",
+      "target": "room",
+      "mutate": "public/room.js:1080-1083",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-f",
+      "target": "room",
+      "mutate": "public/room.js:999-1083",
+      "mutators": [
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-g",
+      "target": "room",
+      "mutate": "public/room.js:999-1083",
+      "mutators": [
+        "CallExpression",
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-930-1000-h",
+      "target": "room",
+      "mutate": "public/room.js:999-1083",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator",
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1001-1098-a",
+      "target": "room",
+      "mutate": "public/room.js:1084-1175",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1001-1098-b",
+      "target": "room",
+      "mutate": "public/room.js:1176-1182",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1001-1098-c",
+      "target": "room",
+      "mutate": "public/room.js:1084-1182",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1001-1098-d",
+      "target": "room",
+      "mutate": "public/room.js:1084-1182",
+      "mutators": [
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1001-1098-e",
+      "target": "room",
+      "mutate": "public/room.js:1084-1182",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1001-1098-f",
+      "target": "room",
+      "mutate": "public/room.js:1084-1182",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1001-1098-g",
+      "target": "room",
+      "mutate": "public/room.js:1084-1182",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator",
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-a",
+      "target": "room",
+      "mutate": "public/room.js:1183-1264",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-b",
+      "target": "room",
+      "mutate": "public/room.js:1265-1363",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-c",
+      "target": "room",
+      "mutate": "public/room.js:1183-1262",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-d",
+      "target": "room",
+      "mutate": "public/room.js:1263-1336",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-e",
+      "target": "room",
+      "mutate": "public/room.js:1337-1363",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-f",
+      "target": "room",
+      "mutate": "public/room.js:1183-1363",
+      "mutators": [
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-g",
+      "target": "room",
+      "mutate": "public/room.js:1183-1312",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-h",
+      "target": "room",
+      "mutate": "public/room.js:1313-1363",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-i",
+      "target": "room",
+      "mutate": "public/room.js:1183-1363",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-j",
+      "target": "room",
+      "mutate": "public/room.js:1183-1363",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1099-1267-k",
+      "target": "room",
+      "mutate": "public/room.js:1183-1363",
+      "mutators": [
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-a",
+      "target": "room",
+      "mutate": "public/room.js:1364-1471",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-b",
+      "target": "room",
+      "mutate": "public/room.js:1364-1435",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-c",
+      "target": "room",
+      "mutate": "public/room.js:1436-1471",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-d",
+      "target": "room",
+      "mutate": "public/room.js:1364-1471",
+      "mutators": [
+        "BooleanLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-e",
+      "target": "room",
+      "mutate": "public/room.js:1364-1471",
+      "mutators": [
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-f",
+      "target": "room",
+      "mutate": "public/room.js:1364-1471",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-g",
+      "target": "room",
+      "mutate": "public/room.js:1364-1471",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1268-1374-h",
+      "target": "room",
+      "mutate": "public/room.js:1364-1471",
+      "mutators": [
+        "OptionalChaining",
+        "ObjectLiteral",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1375-1452-a",
+      "target": "room",
+      "mutate": "public/room.js:1472-1542",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1375-1452-b",
+      "target": "room",
+      "mutate": "public/room.js:1543-1575",
+      "mutators": [
+        "StringLiteral"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1375-1452-c",
+      "target": "room",
+      "mutate": "public/room.js:1472-1575",
+      "mutators": [
+        "ConditionalExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1375-1452-d",
+      "target": "room",
+      "mutate": "public/room.js:1472-1575",
+      "mutators": [
+        "BooleanLiteral",
+        "CallExpression"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1375-1452-e",
+      "target": "room",
+      "mutate": "public/room.js:1472-1575",
+      "mutators": [
+        "BlockStatement"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    },
+    {
+      "shard": "room-1375-1452-f",
+      "target": "room",
+      "mutate": "public/room.js:1472-1575",
+      "mutators": [
+        "EqualityOperator",
+        "LogicalOperator",
+        "ArithmeticOperator",
+        "UpdateOperator",
+        "AssignmentOperator",
+        "ArrayDeclaration",
+        "ArrowFunction",
+        "MethodExpression",
+        "Regex",
+        "OptionalChaining"
+      ],
+      "tests": "test/room.test.ts test/room-join-edges.test.ts test/video-width.test.ts test/pinch-zoom.test.ts test/contrast.test.ts test/config-timings-edges.test.ts",
+      "browser": "chromium",
+      "timeout": 45
+    }
+  ]
+}
