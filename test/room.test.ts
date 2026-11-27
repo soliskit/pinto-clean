@@ -2986,54 +2986,58 @@ void test('losing a remote room transport warns and preserves an unrelated call'
         console.log(`Call-timeline dump failed: ${String(dumpError)}`)
       }
     }
+    type TimelineEntry = Awaited<ReturnType<typeof timeline>>[number]
+    const isWaitingRecovery = (entry: TimelineEntry) =>
+      entry.errorAfter?.includes('Waiting for its connection to recover') ===
+        true && entry.statusAfter === '3rd in the room'
+    const isTerminalLoss = (entry: TimelineEntry) =>
+      entry.conn !== undefined &&
+      entry.conn === lostId &&
+      entry.errorAfter?.includes('A call connection failed. The call ended.')
+    const isRoomLoss = (entry: TimelineEntry) =>
+      entry.event === 'user-disconnected' &&
+      entry.errorAfter?.includes("other person's room connection was lost")
+    // REQ 21 designs both orders for a remote transport loss: the departure
+    // notice can arrive while the call is still live (the waiting notice,
+    // then the terminal call-failure notice), or the call can close before
+    // its departure notice (the room-connection-lost notice). Either order
+    // is correct, so the record decides which one happened and each order
+    // is checked against its own designed warning
+    let expectedError: string
     try {
-      phase('wait: waiting record')
-      // The approved linger: the frozen tile waits while the loss is
-      // declared. The record persists even if the live notice is replaced
-      // between polls.
+      phase('wait: declared loss')
+      // Wait for whichever terminal evidence the actual order produces:
+      // the terminal close notice on the lost connection, or the room-loss
+      // notice on the departure announcement (single test-only 90s bound,
+      // not an app deadline)
       await eventually(
-        async () =>
-          (await timeline()).some(
-            (entry) =>
-              entry.errorAfter?.includes(
-                'Waiting for its connection to recover'
-              ) && entry.statusAfter === '3rd in the room'
-          ),
-        true,
-        60_000
-      )
-      phase('wait: terminal record')
-      // The browser declares the call dead on its own: the call ends
-      // visibly, in the dispatch of an event on the lost member's
-      // connection, whatever kind that event is (test-only 90s bound, not
-      // an app deadline)
-      await eventually(
-        async () =>
-          (await timeline()).some(
-            (entry) =>
-              entry.conn !== undefined &&
-              entry.conn === lostId &&
-              entry.errorAfter?.includes(
-                'A call connection failed. The call ended.'
-              )
-          ),
+        async () => {
+          const entries = await timeline()
+          return entries.some(isTerminalLoss) || entries.some(isRoomLoss)
+        },
         true,
         90_000
       )
       phase('record: ordered assertions')
-      // Both notices, in the approved order, from the record
       const entries = await timeline()
-      const waitingAt = entries.findIndex((entry) =>
-        entry.errorAfter?.includes('Waiting for its connection to recover')
+      const waitingAt = entries.findIndex(isWaitingRecovery)
+      const terminalAt = entries.findIndex(isTerminalLoss)
+      const roomLossAt = entries.findIndex(isRoomLoss)
+      const closeAt = entries.findIndex(
+        (entry) => entry.event === 'close' && entry.conn === lostId
       )
-      const terminalAt = entries.findIndex(
-        (entry) =>
-          entry.conn === lostId &&
-          entry.errorAfter?.includes(
-            'A call connection failed. The call ended.'
-          )
-      )
-      assert.ok(waitingAt >= 0 && terminalAt > waitingAt)
+      if (terminalAt >= 0) {
+        // Linger order: the waiting notice precedes the terminal one
+        assert.ok(waitingAt >= 0 && waitingAt < terminalAt)
+        expectedError =
+          'Call connection: A call connection failed. The call ended.'
+      } else {
+        // Close-first order: the close precedes the announcement, and the
+        // room-loss notice is its designed terminal evidence
+        assert.ok(roomLossAt >= 0 && closeAt >= 0 && closeAt < roomLossAt)
+        expectedError =
+          "Call connection: A call ended because the other person's room connection was lost. No automatic redial is attempted."
+      }
     } catch (error) {
       // Evidence first, then the original failure
       await dump()
@@ -3042,11 +3046,9 @@ void test('losing a remote room transport warns and preserves an unrelated call'
     phase('evidence: dump')
     await dump()
     phase('live: terminal state')
-    // The live page shows the terminal state, not only the record
-    assert.equal(
-      (await controls(a.page)).error,
-      'Call connection: A call connection failed. The call ended.'
-    )
+    // The live page shows the terminal state for the order that happened
+    assert.ok(expectedError)
+    assert.equal((await controls(a.page)).error, expectedError)
     await eventually(status(a.page), '2nd in the room')
     assert.equal(
       await a.page.evaluate(
