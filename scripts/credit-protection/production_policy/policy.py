@@ -2,14 +2,30 @@ import hashlib
 import json
 import re
 
-ISSUER_VERSION = "credit-issuer production 0.5.0"
-EPOCH = 3
+ISSUER_VERSION = "credit-issuer production 0.6.0"
+EPOCH = 4
 
 REQUIRED_NAME = "David Solis"
 REQUIRED_EMAIL = "doze.inept.0n@icloud.com"
 REQUIRED_IDENT = (REQUIRED_NAME, REQUIRED_EMAIL)
 
 REQUIRED_SECTIONS = ("Why:", "How:", "Tags:")
+
+# Formatting compatibility only; every object still gets credit/identity checks.
+TARGET_REPOSITORY = "soliskit/pinto-clean"
+TARGET_REPOSITORY_ID = 1472271845
+HISTORICAL_FORMAT_OBJECTS = frozenset(
+    (
+        "5987c92b4685a32380c6a349de24843d62cf6909",
+        "64c786ef7dec98bde3038889134431bff229852f",
+        "85e0fcab72cac5fae1af2df921627f719a635ad2",
+        "88796dc33941835876321a0304c1b974b2c04eab",
+        "ad5083a1e3ebf1fc332f9159246079d883db1b12",
+        "c892c84d5ccab3aba7fe015c723d84fa9c235c0e",
+        "d453d26a24528ddc65f1469facbfeb88d6fd569a",
+        "dd5b0500b557e4922c03ca622baba026ade27f94",
+    )
+)
 
 
 PROHIBITED_ALTERNATIVES = [
@@ -63,6 +79,10 @@ def policy_config(epoch=EPOCH):
         "required_author": list(REQUIRED_IDENT),
         "required_committer": list(REQUIRED_IDENT),
         "required_sections": list(REQUIRED_SECTIONS),
+        "historical_format_objects": sorted(HISTORICAL_FORMAT_OBJECTS),
+        "target_repository": TARGET_REPOSITORY,
+        "target_repository_id": TARGET_REPOSITORY_ID,
+        "format_scope": "new-object-only-with-exact-reviewed-format-compatibility",
         "prohibited_ids": [i for i, _p, _s in PROHIBITED_ALTERNATIVES],
         "max_parents": MAX_PARENTS,
         "max_commits": MAX_COMMITS,
@@ -85,16 +105,32 @@ def code_digest():
     return hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
 
 
-def check_message(message):
-    pass
-    for tag in REQUIRED_SECTIONS:
-        lines = [line for line in message.split("\n") if line.startswith(tag)]
+def check_message(message, sha=None):
+    from project_bootstrap import publication_gate as project_profile
 
-        if not lines or not lines[0][len(tag) :].strip(" \t\r\n"):
-            raise ValueError(f"message missing or empty {tag}")
+    if any(c in message for c in "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
+        raise ValueError("ambiguous message line separator")
+    project_profile.full_message(message.encode("utf-8"))
     m = PROHIBITED_CREDIT.search(message)
     if m:
         raise ValueError(f"prohibited credit/attribution: {m.group(0)!r}")
+    if sha in HISTORICAL_FORMAT_OBJECTS:
+        return
+    for tag in REQUIRED_SECTIONS:
+        lines = message.splitlines()
+        positions = [i for i, line in enumerate(lines) if line.startswith(tag)]
+        if len(positions) != 1:
+            raise ValueError(f"message missing or repeated {tag}")
+        start = positions[0]
+        next_sections = [
+            i
+            for i in range(start + 1, len(lines))
+            if any(lines[i].startswith(t) for t in REQUIRED_SECTIONS)
+        ]
+        end = min(next_sections, default=len(lines))
+        value = "\n".join([lines[start][len(tag) :], *lines[start + 1 : end]])
+        if not value.strip():
+            raise ValueError(f"message empty {tag}")
 
 
 def source_digests():
